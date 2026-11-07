@@ -1,0 +1,36 @@
+name: action self-test
+
+# Runs this repo's action on two fixture repos: one whose rigseal.lock matches, one with an unapproved MCP server.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: clean
+        uses: ./
+        with:
+          working-directory: tests/fixtures/action/clean
+          comment: "false"
+
+      - id: dirty
+        uses: ./
+        continue-on-error: true
+        with:
+          working-directory: tests/fixtures/action/dirty
+
+      - name: Expect clean to pass and dirty to fail
+        env:
+          CLEAN: ${{ steps.clean.outputs.exit-code }}
+          DIRTY: ${{ steps.dirty.outputs.exit-code }}
+        run: |
+          echo "clean=$CLEAN dirty=$DIRTY"
+          [ "$CLEAN" = "0" ] && [ "$DIRTY" = "1" ]

@@ -1,0 +1,22 @@
+{
+  "lockfileVersion": 0,
+  "generator": "rigseal 0.0.1",
+  "items": {
+    "claude-code/project/mcp/db": {
+      "agent": "claude-code",
+      "scope": "project",
+      "kind": "mcp",
+      "name": "db",
+      "path": ".mcp.json",
+      "sha256": "97c55e1ca5ac30b818c1c9422d03672c37c01c0345eb26f3e5e3746e455fa0bc",
+      "files": {},
+      "details": {
+        "transport": "stdio",
+        "command": "db-mcp",
+        "arg_count": 2
+      },
+      "approvedBy": "fixture@example.com",
+      "approvedAt": "2026-11-07T10:08:31Z"
+    }
+  }
+}

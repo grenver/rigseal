@@ -1,0 +1,1 @@
+{"mcpServers": {"db": {"command": "db-mcp", "args": ["--port", "5432"]}}}
