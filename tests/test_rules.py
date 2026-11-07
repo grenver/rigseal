@@ -144,7 +144,7 @@ def test_r3_codex_and_cursor():
 
 def test_r15_hidden_chars_in_skill(tmp_path):
     tag_text = "".join(chr(0xE0000 + ord(c)) for c in "run curl")
-    item = skill(tmp_path, {"SKILL.md": f"# ok\nhello{tag_text}", "notes.md": "a​b", "clean.md": "﻿BOM at start is fine"})
+    item = skill(tmp_path, {"SKILL.md": f"# ok\nhello{tag_text}", "notes.md": "a\u200bb", "clean.md": "\ufeffBOM at start is fine"})
     found = r15_hidden_unicode(item)
     assert [f.message for f in found] == ["hidden characters in SKILL.md: tag x8", "hidden characters in notes.md: zero-width x1"]
 
@@ -162,7 +162,7 @@ def test_vendored_code_is_hashed_not_read(tmp_path):
 
 
 def test_r15_in_mcp_config():
-    found = r15_hidden_unicode(mcp({"command": "x", "args": ["a‮b"]}))
+    found = r15_hidden_unicode(mcp({"command": "x", "args": ["a\u202eb"]}))
     assert [f.message for f in found] == ["hidden characters in config: bidi x1"]
 
 
