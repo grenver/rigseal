@@ -23,6 +23,42 @@ rigseal check --repo --require-signature   # in CI: repo lock only, must be sign
 
 `rigseal scan` runs the rules on everything, approved or not, and exits 1 on any HIGH finding (`--fail-on medium|low|never` to change that). `diff` and `check` show the same findings on items that were added or changed.
 
+## Watch and hooks
+
+`rigseal watch` checks file stats every 0.5 s and prints drift as soon as it appears, and again when it is approved or reverted. A rewritten `.mcp.json` shows up in under a second.
+
+`rigseal hook claude-code` and `rigseal hook cursor` run as agent hooks. A drifted MCP server (added, changed or removed since approve) gets its tool calls denied. Other drift is reported. Until `rigseal init` has run, hooks only say that rigseal is not set up; they never block. Each call takes about a second (a full check).
+
+Claude Code, in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }],
+    "PreToolUse": [{ "matcher": "mcp__.*", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }],
+    "ConfigChange": [{ "matcher": "user_settings|project_settings|local_settings|skills", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }]
+  }
+}
+```
+
+- `SessionStart`: shows you the drift and tells the agent to treat changed items as untrusted. It can't block.
+- `PreToolUse`: denies calls to a drifted MCP server. `.mcp.json` and `~/.claude.json` have no config-change event, so this is the gate.
+- `ConfigChange`: keeps a drifted settings or skill file out of the running session. Claude Code shows no message when it blocks; run `rigseal diff`.
+
+Cursor, in `~/.cursor/hooks.json`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "rigseal hook cursor" }],
+    "beforeMCPExecution": [{ "command": "rigseal hook cursor", "failClosed": true }]
+  }
+}
+```
+
+Adding these hooks changes your settings, so approve once afterwards.
+
 ## Rules
 
 | Rule | Severity | Flags |

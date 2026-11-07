@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +14,8 @@ from rich.console import Console
 from rich.table import Table
 
 from rigseal import lock as lk
-from rigseal import rules, sarif, signing
+from rigseal import hooks, rules, sarif, signing
+from rigseal import watch as wt
 from rigseal.cache import Cache, cache_path
 from rigseal.capabilities import enrich
 from rigseal.collectors import COLLECTORS
@@ -73,15 +76,19 @@ class Ctx:
         return str(self.project) if self.project else ""
 
 
-def load(home: Path, project: Path) -> Ctx:
+def _load(home: Path, project: Path) -> Ctx:
     home, proj = _paths(home, project)
+    items = inventory(home, proj)
+    repo = lk.read_lock(lk.repo_lock_path(proj)) if proj else None
+    machine = lk.read_lock(lk.machine_lock_path(home))
+    return Ctx(home, proj, items, lk.split(items, home, proj or home), repo, machine)
+
+
+def load(home: Path, project: Path) -> Ctx:
     try:
-        items = inventory(home, proj)
-        repo = lk.read_lock(lk.repo_lock_path(proj)) if proj else None
-        machine = lk.read_lock(lk.machine_lock_path(home))
+        return _load(home, project)
     except CollectError as e:
         raise _fail(str(e)) from e
-    return Ctx(home, proj, items, lk.split(items, home, proj or home), repo, machine)
 
 
 def change_findings(ctx: Ctx, found: list[lk.Change]) -> dict[str, list[Finding]]:
@@ -111,6 +118,27 @@ def changes(ctx: Ctx, repo_only: bool) -> list[lk.Change]:
         result += lk.diff_entries(ctx.machine.items, ctx.current.machine, "machine")
         result += lk.diff_entries(ctx.machine.projects.get(ctx.project_key, {}), ctx.current.local, "machine")
     return result
+
+
+def drift(ctx: Ctx) -> tuple[list[lk.Change], str | None]:
+    """All drift, for hooks and watch. Without a machine lock rigseal is not set up: nothing is checked, a note says so."""
+    if ctx.machine is None:
+        return [], f"rigseal is not set up (no {lk.machine_lock_path(ctx.home)}); run `rigseal init`."
+    return changes(ctx, repo_only=False), None
+
+
+def item_paths(ctx: Ctx) -> dict[str, str]:
+    """Key -> absolute path, for current items and for locked ones that are gone."""
+    out = {}
+    locked = [(ctx.repo.items if ctx.repo else {}, ctx.project or ctx.home)]
+    if ctx.machine:
+        locked += [(ctx.machine.items, ctx.home), *((v, ctx.home) for v in ctx.machine.projects.values())]
+    for entries, base in locked:
+        for key, e in entries.items():
+            path = str(e.get("path", ""))
+            out[key] = str(ctx.home / path[2:] if path.startswith("~/") else base / path)
+    out.update({lk.item_key(i): i.path for i in ctx.items})
+    return out
 
 
 def signature_problems(ctx: Ctx, repo_only: bool, require: bool) -> list[str]:
@@ -394,3 +422,83 @@ def scan(
         out.print(", ".join(f"{n} {s}" for s, n in counts.items()) if findings else "no findings")
     if fail_on != "never" and any(rules.SEVERITIES.index(f.severity) <= rules.SEVERITIES.index(fail_on) for f in findings):
         raise typer.Exit(1)
+
+
+AGENTS = ("claude-code", "cursor")
+
+
+@app.command()
+def hook(
+    agent: Annotated[str, typer.Argument(help="claude-code or cursor")],
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Run as an agent hook: reads the hook's JSON on stdin, prints the agent's JSON reply. See README for setup."""
+    if agent not in AGENTS:
+        raise _fail(f"agent must be one of: {', '.join(AGENTS)}")
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    roots = payload.get("workspace_roots") or []
+    where = Path(str(payload.get("cwd") or (roots[0] if roots else "") or Path.cwd()))
+    try:
+        ctx = _load(home, where if where.is_dir() else home)
+        found, note = drift(ctx)
+        paths = item_paths(ctx)
+    except CollectError as e:  # never break the agent because rigseal failed; say so
+        found, note, paths = [], f"rigseal could not check the agent setup: {e}", {}
+    if agent == "claude-code":
+        reply, code = hooks.claude_code(payload, found, paths, note)
+    else:
+        reply, code = hooks.cursor(payload, found, note)
+    if reply is not None:
+        typer.echo(json.dumps(reply))
+    raise typer.Exit(code)
+
+
+@app.command()
+def watch(
+    project: ProjectOpt = Path("."),
+    interval: Annotated[float, typer.Option("--interval", help="Seconds between file checks.")] = 0.5,
+    rescan: Annotated[float, typer.Option("--rescan", help="Seconds between full checks when no file changed.")] = 30.0,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Watch your agent setup and print drift the moment it appears. Ctrl-C to stop."""
+    state: dict = {}
+
+    def say_once(note: str | None) -> None:
+        if note and note != state.get("note"):
+            out.print(f"[yellow]{note}[/yellow]")
+        state["note"] = note
+
+    def check() -> wt.Result:
+        try:
+            ctx = _load(home, project)
+        except CollectError as e:  # e.g. a config caught half-written by an editor: keep the last result, try again
+            say_once(f"error: {e}")
+            return state.get("result") or wt.Result([], [], {})
+        found, note = drift(ctx)
+        say_once(note)
+        current = {**ctx.current.repo, **ctx.current.machine, **ctx.current.local}
+        locks = [lk.machine_lock_path(ctx.home)] + ([lk.repo_lock_path(ctx.project)] if ctx.project else [])
+        shas = {c.key: current.get(c.key, {}).get("sha256") for c in found}
+        state["ctx"], state["result"] = ctx, wt.Result(wt.watched_paths(ctx.items, locks), found, shas)
+        return state["result"]
+
+    watcher = wt.Watcher(check, rescan=rescan)
+    out.print(f"watching, file check every {interval}s. Ctrl-C to stop.")
+    try:
+        while True:
+            if tick := watcher.poll():
+                new, cleared = tick
+                stamp = datetime.now().strftime("%H:%M:%S")
+                if new:
+                    out.print(f"[bold]{stamp}[/bold] drift:")
+                    print_changes(new, change_findings(state["ctx"], new))
+                for key in cleared:
+                    out.print(f"[bold]{stamp}[/bold] [green]ok[/green] {key} (approved or reverted)")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        out.print("stopped")
