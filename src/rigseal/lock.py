@@ -140,6 +140,7 @@ class Change:
     files_removed: list[str] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
     details_changed: list[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)  # "+ network", "+ host evil.com", "- shell"
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v or k in ("key", "status", "lock")}
@@ -165,9 +166,32 @@ def diff_entries(locked: dict[str, dict], current: dict[str, dict], lock_name: s
                     files_removed=sorted(of.keys() - nf.keys()),
                     files_changed=sorted(k for k in of.keys() & nf.keys() if of[k] != nf[k]),
                     details_changed=sorted(k for k in od.keys() | nd.keys() if od.get(k) != nd.get(k)),
+                    capabilities=capability_diff(od.get("capabilities") or {}, nd.get("capabilities") or {}),
                 )
             )
     return changes
+
+
+CAP_LABELS = {"hosts": "host", "sensitive_paths": "sensitive path", "allowed_tools": "allowed tool"}
+
+
+def capability_diff(old: dict, new: dict) -> list[str]:
+    """Readable lines for what an item can now do that it couldn't before (and the reverse)."""
+    lines = []
+    for k in sorted(old.keys() | new.keys()):
+        a, b = old.get(k), new.get(k)
+        if a == b:
+            continue
+        if isinstance(a, bool) or isinstance(b, bool):
+            lines.append(f"{'+' if b else '-'} {k}")
+        elif k == "hidden_chars":
+            lines += [f"+ hidden chars in {f}" for f in sorted((b or {}).keys() - (a or {}).keys())]
+            lines += [f"- hidden chars in {f}" for f in sorted((a or {}).keys() - (b or {}).keys())]
+        else:
+            label = CAP_LABELS.get(k, k)
+            lines += [f"+ {label} {v}" for v in sorted(set(b or []) - set(a or []))]
+            lines += [f"- {label} {v}" for v in sorted(set(a or []) - set(b or []))]
+    return lines
 
 
 def apply(locked: dict[str, dict], current: dict[str, dict], keys: set[str] | None, who: str, when: str) -> dict[str, dict]:

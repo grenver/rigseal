@@ -10,9 +10,10 @@ from rich.console import Console
 from rich.table import Table
 
 from rigseal import lock as lk
-from rigseal import signing
+from rigseal import rules, signing
+from rigseal.capabilities import enrich
 from rigseal.collectors import COLLECTORS
-from rigseal.model import CollectError, Item
+from rigseal.model import CollectError, Finding, Item
 from rigseal.signing import SignError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -36,6 +37,7 @@ def inventory(home: Path, project: Path | None) -> list[Item]:
     items: list[Item] = []
     for collect in COLLECTORS:
         items += collect(home, project)
+    enrich(items)
     return items
 
 
@@ -54,6 +56,7 @@ def _paths(home: Path, project: Path) -> tuple[Path, Path | None]:
 class Ctx:
     home: Path
     project: Path | None
+    items: list[Item]
     current: lk.Current
     repo: lk.Lock | None
     machine: lk.Lock | None
@@ -66,12 +69,30 @@ class Ctx:
 def load(home: Path, project: Path) -> Ctx:
     home, proj = _paths(home, project)
     try:
-        current = lk.split(inventory(home, proj), home, proj or home)
+        items = inventory(home, proj)
         repo = lk.read_lock(lk.repo_lock_path(proj)) if proj else None
         machine = lk.read_lock(lk.machine_lock_path(home))
     except CollectError as e:
         raise _fail(str(e)) from e
-    return Ctx(home, proj, current, repo, machine)
+    return Ctx(home, proj, items, lk.split(items, home, proj or home), repo, machine)
+
+
+def change_findings(ctx: Ctx, found: list[lk.Change]) -> dict[str, list[Finding]]:
+    """Findings on added or changed items, plus R1 for any MCP drift, keyed by item key."""
+    by_key: dict[str, list[Finding]] = {}
+    for f in rules.scan(ctx.items):
+        by_key.setdefault(f.key, []).append(f)
+    kinds = {k: e["kind"] for part in (ctx.current.repo, ctx.current.machine, ctx.current.local) for k, e in part.items()}
+    locked = [ctx.repo.items if ctx.repo else {}] + ([ctx.machine.items, *ctx.machine.projects.values()] if ctx.machine else [])
+    for part in locked:
+        kinds.update({k: e["kind"] for k, e in part.items() if k not in kinds})
+    out: dict[str, list[Finding]] = {}
+    for c in found:
+        r1 = rules.r1_mcp_drift(c.key, kinds.get(c.key, ""), c.status)
+        here = ([r1] if r1 else []) + (by_key.get(c.key, []) if c.status != "removed" else [])
+        if here:
+            out[c.key] = here
+    return out
 
 
 def changes(ctx: Ctx, repo_only: bool) -> list[lk.Change]:
@@ -109,17 +130,29 @@ def signature_problems(ctx: Ctx, repo_only: bool, require: bool) -> list[str]:
     return problems
 
 
-def print_changes(found: list[lk.Change]) -> None:
+SEV_STYLE = {"high": "red", "medium": "yellow", "low": "dim"}
+
+
+def finding_line(f: Finding) -> str:
+    return f"[{SEV_STYLE[f.severity]}]{f.severity.upper():6}[/] {f.rule:4} {f.message}"
+
+
+def print_changes(found: list[lk.Change], findings: dict[str, list[Finding]]) -> None:
     marks = {"added": "[green]+[/green]", "removed": "[red]-[/red]", "changed": "[yellow]~[/yellow]"}
     for c in found:
         out.print(f"{marks[c.status]} {c.key}  [dim]({c.lock} lock, {c.status})[/dim]")
+        for f in findings.get(c.key, []):
+            out.print(f"    {finding_line(f)}")
         if c.status != "changed":
             continue
         for label, files in (("changed", c.files_changed), ("new file", c.files_added), ("gone", c.files_removed)):
             for f in files:
                 out.print(f"    {label}: {f}")
-        if c.details_changed:
-            out.print(f"    details: {', '.join(c.details_changed)}")
+        for line in c.capabilities:
+            out.print(f"    [bold]{line}[/bold]")
+        other = [d for d in c.details_changed if d != "capabilities"]
+        if other:
+            out.print(f"    details: {', '.join(other)}")
 
 
 def _notes(item: Item) -> str:
@@ -171,12 +204,17 @@ def diff(project: ProjectOpt = Path("."), repo_only: RepoOpt = False, as_json: J
     """Show what changed since the last approve."""
     ctx = load(home, project)
     found = changes(ctx, repo_only)
+    findings = change_findings(ctx, found)
     if as_json:
-        typer.echo(json.dumps([c.to_dict() for c in found], indent=2))
+        typer.echo(json.dumps([{**c.to_dict(), **_findings_json(findings, c.key)} for c in found], indent=2))
     elif found:
-        print_changes(found)
+        print_changes(found, findings)
     else:
         out.print("no drift")
+
+
+def _findings_json(findings: dict[str, list[Finding]], key: str) -> dict:
+    return {"findings": [f.to_dict() for f in findings[key]]} if key in findings else {}
 
 
 @app.command()
@@ -190,13 +228,15 @@ def check(
     """Exit 0 if nothing changed and signatures are valid, 1 if not, 2 on error."""
     ctx = load(home, project)
     found = changes(ctx, repo_only)
+    findings = change_findings(ctx, found)
     problems = signature_problems(ctx, repo_only, require_signature)
     if as_json:
-        typer.echo(json.dumps({"changes": [c.to_dict() for c in found], "signature_problems": problems}, indent=2))
+        changes_json = [{**c.to_dict(), **_findings_json(findings, c.key)} for c in found]
+        typer.echo(json.dumps({"changes": changes_json, "signature_problems": problems}, indent=2))
     else:
         for p in problems:
             out.print(f"[red]signature:[/red] {p}")
-        print_changes(found)
+        print_changes(found, findings)
         out.print(f"{len(found)} change(s), {len(problems)} signature problem(s)" if found or problems else "ok")
     if found or problems:
         raise typer.Exit(1)
@@ -276,3 +316,32 @@ def approve(
         out.print("nothing to approve")
         return
     _run_approve(ctx, wanted, key, no_sign)
+
+
+@app.command()
+def scan(
+    project: ProjectOpt = Path("."),
+    fail_on: Annotated[str, typer.Option("--fail-on", help="Exit 1 at this severity or worse: high, medium, low, never.")] = "high",
+    as_json: JsonOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Run the rules on everything your agents load, approved or not."""
+    if fail_on not in (*rules.SEVERITIES, "never"):
+        raise _fail("--fail-on must be high, medium, low or never")
+    home, proj = _paths(home, project)
+    try:
+        findings = rules.scan(inventory(home, proj))
+    except CollectError as e:
+        raise _fail(str(e)) from e
+    if as_json:
+        typer.echo(json.dumps([f.to_dict() for f in findings], indent=2))
+    else:
+        for key in dict.fromkeys(f.key for f in findings):
+            out.print(key)
+            for f in findings:
+                if f.key == key:
+                    out.print(f"    {finding_line(f)}")
+        counts = {s: sum(f.severity == s for f in findings) for s in rules.SEVERITIES}
+        out.print(", ".join(f"{n} {s}" for s, n in counts.items()) if findings else "no findings")
+    if fail_on != "never" and any(rules.SEVERITIES.index(f.severity) <= rules.SEVERITIES.index(fail_on) for f in findings):
+        raise typer.Exit(1)

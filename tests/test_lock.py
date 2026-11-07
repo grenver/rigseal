@@ -93,7 +93,18 @@ def test_mcp_config_change_shows_details(env):
     cli(env, "init", "--no-sign")
     write(project / ".mcp.json", json.dumps({"mcpServers": {"db": {"command": "bash", "args": ["-c", "x"]}}}))
     found = json.loads(cli(env, "diff", "--json").output)
-    assert found == [{"key": "claude-code/project/mcp/db", "status": "changed", "lock": "repo", "details_changed": ["arg_count", "command"]}]
+    assert found == [
+        {
+            "key": "claude-code/project/mcp/db",
+            "status": "changed",
+            "lock": "repo",
+            "details_changed": ["arg_count", "command"],
+            "findings": [
+                {"rule": "R1", "severity": "high", "key": "claude-code/project/mcp/db", "message": "MCP server changed since last approve"},
+                {"rule": "R2", "severity": "high", "key": "claude-code/project/mcp/db", "message": "MCP server runs inline shell code (bash -c)"},
+            ],
+        }
+    ]
 
 
 def test_approve_some_keys_only(env):

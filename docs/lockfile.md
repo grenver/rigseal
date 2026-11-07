@@ -42,6 +42,7 @@ A missing `rigseal.lock` counts as empty, so in a fresh clone every project-leve
 - **`sha256`:** for folders (skills, plugins), the hash of the sorted `path\0sha256\n` lines of every file, dotfiles included, with symlinks recorded by target. For MCP servers, the hash of the server's config as canonical JSON. Secrets in env, args and headers are part of that hash but never written to the lock.
 - **`files`:** per-file hashes, so `diff` can say which file changed.
 - **`details`:** non-secret facts shown to people (risky settings keys, MCP transport, command, env key names, symlink target). A change here is drift too.
+- **`details.capabilities`** (skills, commands, agents, rules, plugins): `shell`, `network`, `hosts` (from code and code blocks, not prose links), `sensitive_paths`, `hidden_chars` (per file), `allowed_tools`. Only present keys are written. `diff` prints changes here as `+ host x`, `- shell`, and so on.
 - **`path`** is informational and is not compared.
 - `projects` appears only in the machine lock.
 

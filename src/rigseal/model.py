@@ -29,6 +29,28 @@ class Item:
     sha256: str  # one hash over everything that defines the item
     files: list[FileHash] = field(default_factory=list)
     details: dict = field(default_factory=dict)  # non-secret facts, shown to the user
+    # The parsed config (MCP server, settings), for rules only. May hold secrets: never stored or printed.
+    raw: object = field(default=None, repr=False, compare=False)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        del d["raw"]
+        return d
+
+    def text_files(self) -> list[tuple[str, Path]]:
+        """(relative name, full path) for each hashed file of a file or folder item."""
+        root = Path(self.path)
+        if root.is_dir():
+            return [(f.path, root / f.path) for f in self.files]
+        return [(f.path, root) for f in self.files]
+
+
+@dataclass
+class Finding:
+    rule: str  # R2, R15, ...
+    severity: str  # high | medium | low
+    key: str  # item key, as in the lock
+    message: str  # never contains secret values
 
     def to_dict(self) -> dict:
         return asdict(self)

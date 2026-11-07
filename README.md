@@ -21,6 +21,21 @@ rigseal check               # exit 0 clean, 1 drift or bad signature, 2 error
 rigseal check --repo --require-signature   # in CI: repo lock only, must be signed
 ```
 
+`rigseal scan` runs the rules on everything, approved or not, and exits 1 on any HIGH finding (`--fail-on medium|low|never` to change that). `diff` and `check` show the same findings on items that were added or changed.
+
+## Rules
+
+| Rule | Severity | Flags |
+|---|---|---|
+| R1 | high | an MCP server added, removed or changed without approval |
+| R2 | high | MCP server runs inline shell or interpreter code (`bash -c`, `python -c`), pipes a download into a shell, or lives in a temp folder |
+| R3 | high | project settings that approve themselves: `enableAllProjectMcpServers`, `enabledMcpjsonServers`, `Bash(*)`, `bypassPermissions`, hooks, `apiKeyHelper`, `*_BASE_URL`/proxy env; Codex `approval_policy = never`, `danger-full-access`, `model_providers`, hooks; Cursor hooks |
+| R15 | high | hidden characters: Unicode tags anywhere; bidi and zero-width in instruction files and MCP config |
+| R16 | medium | `npx`/`uvx`/`bunx`/`pnpm dlx` package without a pinned version |
+| R18 | low/medium | skill, command or agent uses shell or network but `allowed-tools` doesn't declare it |
+
+Each skill, command, agent, rule and plugin also gets a capability summary (shell, network, hosts in code, sensitive paths like `~/.ssh`, `allowed-tools`). It is locked, so `diff` shows lines like `+ host evil.io` or `+ shell`. Vendored folders (`node_modules`, `.venv`, `.git`) are hashed but not read for capabilities. Findings name the pattern that matched, never config values.
+
 `rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
 
 **Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock), in git's allowed-signers format:

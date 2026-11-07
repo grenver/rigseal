@@ -35,7 +35,9 @@ def settings_item(agent: str, path: Path, data: dict, scope: str, risky_keys: tu
     details: dict = {"risky_keys": [k for k in risky_keys if k in data]}
     if isinstance(data.get("hooks"), dict):
         details["hook_events"] = sorted(data["hooks"])
-    return single_file(agent, path, scope, "settings", path.name, details)
+    item = single_file(agent, path, scope, "settings", path.name, details)
+    item.raw = data
+    return item
 
 
 def mcp_item(agent: str, name: str, cfg: object, scope: str, where: Path) -> Item:
@@ -52,7 +54,7 @@ def mcp_item(agent: str, name: str, cfg: object, scope: str, where: Path) -> Ite
         for key in ("env", "headers", "http_headers"):
             if isinstance(cfg.get(key), dict) and cfg[key]:
                 details[f"{key}_keys"] = sorted(cfg[key])
-    return Item(agent, scope, "mcp", name, str(where), hash_json(cfg), [], details)
+    return Item(agent, scope, "mcp", name, str(where), hash_json(cfg), [], details, raw=cfg)
 
 
 def mcp_items(agent: str, servers: object, scope: str, where: Path) -> list[Item]:
