@@ -22,6 +22,7 @@ def write(path: Path, text: str) -> None:
 def isolated(monkeypatch, tmp_path):
     for var in ("CODEX_HOME", "RIGSEAL_DIR", "RIGSEAL_SIGNING_KEY", "XDG_CACHE_HOME"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("RIGSEAL_NONINTERACTIVE", "1")  # CliRunner has no terminal
     # Keep the real git config (signing key, email) out of the tests.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")

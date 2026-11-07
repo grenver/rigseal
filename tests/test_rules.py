@@ -44,6 +44,7 @@ def msgs(findings):
 def isolated(monkeypatch, tmp_path):
     for var in ("CODEX_HOME", "RIGSEAL_DIR", "RIGSEAL_SIGNING_KEY", "XDG_CACHE_HOME"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("RIGSEAL_NONINTERACTIVE", "1")  # CliRunner has no terminal
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(write(tmp_path / "gitconfig", "[user]\n\temail = dev@example.com\n")))
 
 

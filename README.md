@@ -16,7 +16,7 @@ uv tool install git+https://github.com/jayhemnani9910/rigseal
 rigseal status              # inventory for your user config + the current repo
 rigseal init                # lock it: ~/.rigseal/machine.lock, and rigseal.lock in the repo
 rigseal diff                # what changed since you approved
-rigseal approve [KEY...]    # accept changes (all, or just these keys)
+rigseal approve [KEY...]    # show changes and ask, then accept them (all, or just these keys)
 rigseal check               # exit 0 clean, 1 drift or bad signature, 2 error
 rigseal check --repo --require-signature   # in CI: repo lock only, must be signed
 ```
@@ -60,12 +60,16 @@ Format details: [docs/lockfile.md](docs/lockfile.md).
 
 rigseal only reads files. It never runs MCP servers, and it never prints secret values: env vars, args and headers are hashed, and only their key names are shown.
 
+`approve` and `init` need a person at a terminal (set `RIGSEAL_NONINTERACTIVE=1` in CI). A signed lock can't be replaced by an unsigned one without `--allow-unsigned`, and once an `allowed_signers` file exists, `check` requires a valid signature. Read [docs/threat-model.md](docs/threat-model.md) for what this does and does not stop: the short version is that approvals are only as safe as a signing key the agent can't use.
+
+In a project, symlinks that leave the repo are recorded but not followed (R12). Folders stop hashing at 20,000 files or 500 MB, and configs over 10 MB or that aren't regular files are refused.
+
 ## What it reads
 
 | Agent | Where |
 |---|---|
-| Claude Code | `~/.claude/settings.json`, `.claude/settings{,.local}.json`, `~/.claude.json` (user + per-project MCP), `.mcp.json`, `skills/*/`, `commands/**/*.md`, `agents/**/*.md`, `~/.claude/plugins/installed_plugins.json` + install folders, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` |
-| Codex | `~/.codex/config.toml` (or `$CODEX_HOME`) and `.codex/config.toml`: settings, `mcp_servers`, hooks; `skills/*/` incl. `.system/`; `plugins/cache/<market>/<plugin>/`; `rules/*.rules`; `AGENTS.md` |
+| Claude Code | `~/.claude/settings.json`, `.claude/settings{,.local}.json`, `~/.claude.json` (user + per-project MCP), `.mcp.json`, `skills/*/`, `commands/**/*.md`, `agents/**/*.md`, `~/.claude/plugins/installed_plugins.json` + install folders, synced plugins and skills (`plugins/synced/`, `skills/synced/`), MCP servers that plugins ship (`.mcp.json` or `plugin.json` `mcpServers`), `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` |
+| Codex | `~/.codex/config.toml` (or `$CODEX_HOME`) and `.codex/config.toml`: settings, `mcp_servers`, hooks; `skills/*/` incl. `.system/`; `plugins/cache/<market>/<plugin>/` and each plugin's `.mcp.json`; `rules/*.rules`; `AGENTS.md` |
 | Cursor | `~/.cursor/` and `.cursor/`: `mcp.json`, `hooks.json`, `skills/*/`, `rules/**/*.mdc`; `.cursorrules` |
 | VS Code / Copilot | VS Code user `mcp.json` + `prompts/` (Linux and macOS paths), `.vscode/mcp.json`, `.github/copilot-instructions.md`, `.github/{instructions,prompts}/`, `.github/skills/`; `~/.copilot/mcp-config.json`, `skills/`, `installed-plugins/` |
 | Shared | `~/.agents/skills/*/`, `.agents/skills/*/` |
@@ -79,7 +83,11 @@ uv sync
 uv run pytest
 uv run --group eval python evals/fetch.py      # eval data into ~/.cache/rigseal-eval
 uv run --group eval python evals/run.py --split train
+uv run python evals/dogfood.py log      # one check, appended to ~/.rigseal/dogfood.jsonl (run daily)
+uv run python evals/dogfood.py report   # drift events per week, and how many were plugin updates
 ```
+
+claude.ai connectors (Gmail, Drive, ...) are configured on your account, not on disk, so rigseal can't see them.
 
 ## License
 

@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 
 from rigseal.collectors import common
-from rigseal.model import Item, hash_tree, tree_digest
+from rigseal.model import Item, tree_digest
 from rigseal.readers import read_json
 
 AGENT = "claude-code"
@@ -24,6 +24,9 @@ RISKY_SETTINGS_KEYS = (
     "statusLine",
 )
 
+# Session bookkeeping inside synced plugins (one file per running session). Not part of the plugin.
+SYNCED_PLUGIN_IGNORE = frozenset({".in_use"})
+
 optional_file = partial(common.optional_file, AGENT)
 files_matching = partial(common.files_matching, AGENT)
 skill_dirs = partial(common.skill_dirs, AGENT)
@@ -37,10 +40,12 @@ def collect(home: Path, project: Path | None) -> list[Item]:
     items += _settings(claude_dir / "settings.json", "user")
     items += optional_file(claude_dir / "CLAUDE.md", "user", "instructions")
     items += _user_mcp(home / ".claude.json", project)
-    items += skill_dirs(claude_dir / "skills", "user")
+    items += skill_dirs(claude_dir / "skills", "user", skip=("synced",))
+    items += _synced_skills(claude_dir / "skills" / "synced")
     items += files_matching(claude_dir / "commands", ".md", "command", "user")
     items += files_matching(claude_dir / "agents", ".md", "agent", "user")
     items += _plugins(claude_dir / "plugins" / "installed_plugins.json")
+    items += _synced_plugins(claude_dir / "plugins" / "synced")
 
     if project is not None:
         pc = project / ".claude"
@@ -48,11 +53,11 @@ def collect(home: Path, project: Path | None) -> list[Item]:
         items += _settings(pc / "settings.local.json", "local")
         mcp_json = project / ".mcp.json"
         items += mcp_items((read_json(mcp_json) or {}).get("mcpServers"), "project", mcp_json)
-        items += skill_dirs(pc / "skills", "project")
-        items += files_matching(pc / "commands", ".md", "command", "project")
-        items += files_matching(pc / "agents", ".md", "agent", "project")
+        items += skill_dirs(pc / "skills", "project", within=project)
+        items += files_matching(pc / "commands", ".md", "command", "project", within=project)
+        items += files_matching(pc / "agents", ".md", "agent", "project", within=project)
         for name, scope in (("CLAUDE.md", "project"), ("CLAUDE.local.md", "local"), ("AGENTS.md", "project")):
-            items += optional_file(project / name, scope, "instructions")
+            items += optional_file(project / name, scope, "instructions", within=project)
     return items
 
 
@@ -86,10 +91,33 @@ def _plugins(path: Path) -> list[Item]:
             if inst.get("gitCommitSha"):
                 details["git_commit"] = inst["gitCommitSha"]
             if install_path.is_dir():
-                digest, files = hash_tree(install_path)
+                items.append(common.tree_item(AGENT, install_path, "plugin", "plugin", name, details))
+                items += common.plugin_mcp(AGENT, install_path, name.split("@")[0])
             else:
                 details["missing"] = True
-                files = []
-                digest = tree_digest(files)
-            items.append(Item(AGENT, "plugin", "plugin", name, str(install_path), digest, files, details))
+                items.append(Item(AGENT, "plugin", "plugin", name, str(install_path), tree_digest([]), [], details))
+    return items
+
+
+def _synced_plugins(root: Path) -> list[Item]:
+    """Plugins synced from claude.ai: synced/<account>/<plugin>[~<marketplace>]/ with a .claude-plugin folder."""
+    if not root.is_dir():
+        return []
+    items = []
+    for account in sorted(p for p in root.iterdir() if p.is_dir()):
+        for d in sorted(p for p in account.iterdir() if (p / ".claude-plugin").is_dir()):
+            manifest = read_json(d / ".claude-plugin" / "plugin.json") or {}
+            name = str(manifest.get("name") or d.name.split("~")[0])
+            items.append(common.tree_item(AGENT, d, "plugin", "plugin", name, {"source": "synced"}, SYNCED_PLUGIN_IGNORE))
+            items += common.plugin_mcp(AGENT, d, name)
+    return items
+
+
+def _synced_skills(root: Path) -> list[Item]:
+    """Skills synced from claude.ai: synced/<account>/<skill>/SKILL.md."""
+    if not root.is_dir():
+        return []
+    items = []
+    for account in sorted(p for p in root.iterdir() if p.is_dir()):
+        items += [common.skill_item(AGENT, d, "synced") for d in sorted(account.iterdir()) if d.is_dir()]
     return items

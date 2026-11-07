@@ -7,7 +7,7 @@ from functools import partial
 from pathlib import Path
 
 from rigseal.collectors import common
-from rigseal.model import Item, hash_tree
+from rigseal.model import Item
 from rigseal.readers import read_toml
 
 AGENT = "codex"
@@ -40,7 +40,7 @@ def collect(home: Path, project: Path | None) -> list[Item]:
 
     if project is not None:
         _config(project / ".codex" / "config.toml", "project", items)
-        items += skill_dirs(project / ".codex" / "skills", "project")
+        items += skill_dirs(project / ".codex" / "skills", "project", within=project)
     return items
 
 
@@ -54,15 +54,20 @@ def _config(path: Path, scope: str, items: list[Item]) -> dict | None:
 
 
 def _plugins(cache: Path, enabled: dict) -> list[Item]:
-    """Plugins live in cache/<marketplace>/<plugin>/. The config says which are enabled."""
+    """Plugins live in cache/<marketplace>/<plugin>/<version>/. The config says which are enabled.
+    MCP servers come from each version folder's .mcp.json."""
     if not cache.is_dir():
         return []
     items = []
     for market in sorted(p for p in cache.iterdir() if p.is_dir()):
         for plugin in sorted(p for p in market.iterdir() if p.is_dir()):
             name = f"{plugin.name}@{market.name}"
-            digest, files = hash_tree(plugin)
             entry = enabled.get(name)
             details = {"enabled": bool(entry.get("enabled")) if isinstance(entry, dict) else False}
-            items.append(Item(AGENT, "plugin", "plugin", name, str(plugin), digest, files, details))
+            items.append(common.tree_item(AGENT, plugin, "plugin", "plugin", name, details))
+            for version in sorted(p for p in plugin.iterdir() if p.is_dir()):
+                for mcp in common.plugin_mcp(AGENT, version, plugin.name):
+                    mcp.details["plugin_enabled"] = details["enabled"]
+                    mcp.details["version"] = version.name
+                    items.append(mcp)
     return items

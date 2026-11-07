@@ -34,10 +34,10 @@ def collect(home: Path, project: Path | None) -> list[Item]:
     if project is not None:
         items += _mcp(VSCODE, project / ".vscode" / "mcp.json", "servers", "project")
         gh = project / ".github"
-        items += common.optional_file(VSCODE, gh / "copilot-instructions.md", "project", "instructions")
-        items += common.files_matching(VSCODE, gh / "instructions", ".md", "instructions", "project")
-        items += common.files_matching(VSCODE, gh / "prompts", ".md", "prompt", "project")
-        items += common.skill_dirs(VSCODE, gh / "skills", "project")
+        items += common.optional_file(VSCODE, gh / "copilot-instructions.md", "project", "instructions", within=project)
+        items += common.files_matching(VSCODE, gh / "instructions", ".md", "instructions", "project", within=project)
+        items += common.files_matching(VSCODE, gh / "prompts", ".md", "prompt", "project", within=project)
+        items += common.skill_dirs(VSCODE, gh / "skills", "project", within=project)
     return items
 
 

@@ -75,22 +75,40 @@ def hash_json(value: object) -> str:
     return hash_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
-def hash_tree(root: Path) -> tuple[str, list[FileHash]]:
-    """Hash every file under root, dotfiles included. Symlinks are recorded by target, not followed."""
+# Limits per folder item, so a hostile repo can't make a scan run for hours.
+MAX_TREE_FILES = 20_000
+MAX_TREE_BYTES = 500 * 1024 * 1024
+
+
+@dataclass
+class Tree:
+    sha256: str
+    files: list[FileHash]
+    truncated: bool = False  # hit MAX_TREE_FILES or MAX_TREE_BYTES; the hash covers what was read
+
+
+def hash_tree(root: Path, ignore: frozenset[str] = frozenset()) -> Tree:
+    """Hash every file under root, dotfiles included. Symlinks are recorded by target, not followed.
+    Names in `ignore` (files or folders) are skipped, for agent bookkeeping that changes every session."""
     files: list[FileHash] = []
+    total = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
+        dirnames[:] = sorted(d for d in dirnames if d not in ignore)
         base = Path(dirpath)
         # os.walk does not descend into symlinked dirs, so record them here.
-        for name in sorted(dirnames + filenames):
+        for name in sorted(dirnames + [f for f in filenames if f not in ignore]):
             p = base / name
             rel = p.relative_to(root).as_posix()
             if p.is_symlink():
                 files.append(FileHash(rel, hash_bytes(b"symlink:" + os.readlink(p).encode())))
             elif p.is_file():
+                total += p.stat().st_size
+                if len(files) >= MAX_TREE_FILES or total > MAX_TREE_BYTES:
+                    files.sort(key=lambda f: f.path)
+                    return Tree(tree_digest(files), files, truncated=True)
                 files.append(FileHash(rel, hash_file(p)))
     files.sort(key=lambda f: f.path)
-    return tree_digest(files), files
+    return Tree(tree_digest(files), files)
 
 
 def tree_digest(files: list[FileHash]) -> str:

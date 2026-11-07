@@ -13,5 +13,5 @@ AGENT = "shared"
 def collect(home: Path, project: Path | None) -> list[Item]:
     items = common.skill_dirs(AGENT, home / ".agents" / "skills", "user")
     if project is not None:
-        items += common.skill_dirs(AGENT, project / ".agents" / "skills", "project")
+        items += common.skill_dirs(AGENT, project / ".agents" / "skills", "project", within=project)
     return items

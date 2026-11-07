@@ -18,14 +18,15 @@ def collect(home: Path, project: Path | None) -> list[Item]:
         roots.append((project / ".cursor", "project"))
 
     for root, scope in roots:
+        within = project if scope == "project" else None
         mcp = root / "mcp.json"
         items += common.mcp_items(AGENT, (read_json(mcp) or {}).get("mcpServers"), scope, mcp)
         items += _hooks(root / "hooks.json", scope)
-        items += common.skill_dirs(AGENT, root / "skills", scope)
-        items += common.files_matching(AGENT, root / "rules", ".mdc", "rule", scope)
+        items += common.skill_dirs(AGENT, root / "skills", scope, within=within)
+        items += common.files_matching(AGENT, root / "rules", ".mdc", "rule", scope, within=within)
 
     if project is not None:
-        items += common.optional_file(AGENT, project / ".cursorrules", "project", "rule")
+        items += common.optional_file(AGENT, project / ".cursorrules", "project", "rule", within=project)
     return items
 
 

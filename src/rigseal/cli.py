@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -27,6 +29,7 @@ JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON.")]
 RepoOpt = Annotated[bool, typer.Option("--repo", help="Only the repo lock (for CI).")]
 KeyOpt = Annotated[Path | None, typer.Option("--key", help="SSH key to sign with (default: $RIGSEAL_SIGNING_KEY, then git user.signingkey).")]
 NoSignOpt = Annotated[bool, typer.Option("--no-sign", help="Do not sign.")]
+AllowUnsignedOpt = Annotated[bool, typer.Option("--allow-unsigned", help="Allow replacing a signed lock with an unsigned one.")]
 
 
 @app.callback()
@@ -121,7 +124,7 @@ def signature_problems(ctx: Ctx, repo_only: bool, require: bool) -> list[str]:
         if not lock.sig_path.exists():
             if lock.signed_by:
                 problems.append(f"{lock.path} says it is signed by {lock.signed_by} but {lock.sig_path.name} is missing")
-            elif require:
+            elif require or default_signers.is_file():  # once signers are set up, unsigned is not ok
                 problems.append(f"{lock.path} is not signed")
         elif not lock.signed_by:
             problems.append(f"{lock.path} has a signature but no signedBy")
@@ -275,8 +278,27 @@ def _approve(ctx: Ctx, keys: set[str] | None, key: Path | None) -> list[str]:
     return notes
 
 
-def _run_approve(ctx: Ctx, keys: set[str] | None, key: Path | None, no_sign: bool) -> None:
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _require_person() -> None:
+    """Approving is a human decision. An agent running rigseal through a tool call has no terminal.
+    CI and scripts can opt out with RIGSEAL_NONINTERACTIVE=1. See docs/threat-model.md for what this does not stop."""
+    if os.environ.get("RIGSEAL_NONINTERACTIVE") == "1":
+        return
+    if not _interactive():
+        raise _fail("approving needs a person at a terminal.")
+
+
+def _run_approve(ctx: Ctx, keys: set[str] | None, key: Path | None, no_sign: bool, allow_unsigned: bool) -> None:
     sign_key = None if no_sign else signing.signing_key(key, ctx.project)
+    signed = [lock for lock in (ctx.repo, ctx.machine) if lock and lock.signed_by]
+    if sign_key is None and signed and not allow_unsigned:
+        raise _fail(
+            f"{signed[0].path} is signed; approving without a key would drop the signature. "
+            "Pass --key, or --allow-unsigned if that is what you want."
+        )
     try:
         for note in _approve(ctx, keys, sign_key):
             out.print(note)
@@ -290,15 +312,22 @@ def init(
     force: Annotated[bool, typer.Option("--force", help="Overwrite existing locks.")] = False,
     key: KeyOpt = None,
     no_sign: NoSignOpt = False,
+    allow_unsigned: AllowUnsignedOpt = False,
     home: HomeOpt = Path.home(),
 ) -> None:
     """Write the machine lock, and the repo lock if this project has agent config."""
     ctx = load(home, project)
+    _require_person()
     existing = [str(lock.path) for lock in (ctx.repo, ctx.machine) if lock]
     if existing and not force:
         raise _fail(f"lock already exists: {', '.join(existing)}. Use `rigseal approve`, or --force.")
+    old_repo, old_machine = ctx.repo, ctx.machine
+    if (old_repo and old_repo.signed_by) or (old_machine and old_machine.signed_by):
+        sign_key = None if no_sign else signing.signing_key(key, ctx.project)
+        if sign_key is None and not allow_unsigned:
+            raise _fail("the existing lock is signed; --force without a key would drop the signature. Pass --key or --allow-unsigned.")
     ctx.repo = ctx.machine = None
-    _run_approve(ctx, None, key, no_sign)
+    _run_approve(ctx, None, key, no_sign, allow_unsigned=True)
 
 
 @app.command()
@@ -307,9 +336,12 @@ def approve(
     project: ProjectOpt = Path("."),
     key: KeyOpt = None,
     no_sign: NoSignOpt = False,
+    allow_unsigned: AllowUnsignedOpt = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask; approve what is listed.")] = False,
     home: HomeOpt = Path.home(),
 ) -> None:
-    """Accept the current state into the locks."""
+    """Accept the current state into the locks. Shows what you are approving and asks first."""
+    _require_person()
     ctx = load(home, project)
     pending = changes(ctx, repo_only=False)
     wanted = set(keys) if keys else None
@@ -318,7 +350,12 @@ def approve(
     if not pending:
         out.print("nothing to approve")
         return
-    _run_approve(ctx, wanted, key, no_sign)
+    if not yes and os.environ.get("RIGSEAL_NONINTERACTIVE") != "1":
+        shown = [c for c in pending if wanted is None or c.key in wanted]
+        print_changes(shown, change_findings(ctx, shown))
+        if not typer.confirm(f"Approve {len(shown)} change(s)?", default=False):
+            raise typer.Exit(1)
+    _run_approve(ctx, wanted, key, no_sign, allow_unsigned)
 
 
 @app.command()

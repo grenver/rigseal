@@ -9,6 +9,8 @@ from pathlib import Path
 
 from rigseal.model import CollectError
 
+MAX_CONFIG_BYTES = 10 * 1024 * 1024  # agent configs are small; a huge one is an attack or an accident
+
 # A JSON string, a // comment, or a /* */ comment. Strings come first so comment markers inside them are kept.
 _TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 _TRAILING_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(\s*[}\]])', re.S)
@@ -22,6 +24,10 @@ def strip_jsonc(text: str) -> str:
 def read_json(path: Path) -> dict | None:
     """Return the object in a JSON/JSONC file, None if the file is missing, CollectError if it is broken."""
     try:
+        if path.exists() and not path.is_file():
+            raise CollectError(f"{path} is not a regular file; not reading it")
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise CollectError(f"{path} is over {MAX_CONFIG_BYTES // 2**20} MB; not reading it")
         text = path.read_text()
     except FileNotFoundError:
         return None
@@ -43,6 +49,10 @@ def read_json(path: Path) -> dict | None:
 
 def read_toml(path: Path) -> dict | None:
     try:
+        if path.exists() and not path.is_file():
+            raise CollectError(f"{path} is not a regular file; not reading it")
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise CollectError(f"{path} is over {MAX_CONFIG_BYTES // 2**20} MB; not reading it")
         with path.open("rb") as f:
             return tomllib.load(f)
     except FileNotFoundError:

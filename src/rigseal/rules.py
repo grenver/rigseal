@@ -165,6 +165,16 @@ def r18_undeclared(item: Item) -> list[Finding]:
     return []
 
 
+def r12_containment(item: Item) -> list[Finding]:
+    """R12 (structure): links that leave the project, and folders too big to hash fully."""
+    out = []
+    if item.details.get("outside_project"):
+        out.append(Finding("R12", "high", item_key(item), "links to a path outside the project (not followed)"))
+    if item.details.get("truncated"):
+        out.append(Finding("R12", "medium", item_key(item), "too many files or bytes to hash fully"))
+    return out
+
+
 RULES: list[Callable[[Item], list[Finding]]] = [
     r2_risky_stdio,
     r3_self_approving_project,
@@ -172,6 +182,7 @@ RULES: list[Callable[[Item], list[Finding]]] = [
     r16_unpinned_runner,
     r18_undeclared,
     text_findings,
+    r12_containment,
 ]
 
 
