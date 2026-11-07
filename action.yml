@@ -1,0 +1,88 @@
+name: rigseal check
+description: Fail the PR when agent skills, plugins, hooks or MCP servers change without an approved rigseal.lock
+branding:
+  icon: lock
+  color: gray-dark
+
+inputs:
+  require-signature:
+    description: Fail if rigseal.lock is not signed by someone in .rigseal/allowed_signers
+    default: "false"
+  upload-sarif:
+    description: Upload findings to GitHub code scanning (needs `security-events: write`; private repos need GitHub Advanced Security)
+    default: "false"
+  comment:
+    description: Post or update one PR comment with the drift (needs `pull-requests: write`)
+    default: "true"
+  working-directory:
+    description: Folder that holds rigseal.lock
+    default: "."
+
+outputs:
+  exit-code:
+    description: 0 no drift, 1 drift or signature problem, 2 error
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+    - id: check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RIGSEAL: uv tool run --from ${{ github.action_path }} rigseal
+        REQUIRE_SIG: ${{ inputs.require-signature }}
+        COLUMNS: "200"
+      run: |
+        args=(check --repo)
+        [ "$REQUIRE_SIG" = "true" ] && args+=(--require-signature)
+        set +e
+        $RIGSEAL "${args[@]}" --sarif > "$RUNNER_TEMP/rigseal.sarif"
+        code=$?
+        $RIGSEAL "${args[@]}" > "$RUNNER_TEMP/rigseal.txt" 2>&1
+        set -e
+        cat "$RUNNER_TEMP/rigseal.txt"
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+
+    - if: inputs.upload-sarif == 'true' && steps.check.outputs.exit-code != '2'
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ runner.temp }}/rigseal.sarif
+        category: rigseal
+
+    - if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number }}
+        CODE: ${{ steps.check.outputs.exit-code }}
+      run: |
+        body="$RUNNER_TEMP/rigseal-comment.md"
+        {
+          echo "<!-- rigseal -->"
+          if [ "$CODE" = "0" ]; then
+            echo "### rigseal: no unapproved agent config changes"
+          else
+            echo "### rigseal: agent config changed without approval"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/rigseal.txt"
+            echo '```'
+            echo
+            echo "If these changes are intended, run \`rigseal approve\` locally and commit \`rigseal.lock\`."
+          fi
+        } > "$body"
+        existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+          --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- rigseal -->")))][0].id // empty')
+        if [ -n "$existing" ]; then
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F "body=@$body" > /dev/null
+        elif [ "$CODE" != "0" ]; then
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$body"
+        fi
+
+    - shell: bash
+      env:
+        CODE: ${{ steps.check.outputs.exit-code }}
+      run: exit "$CODE"

@@ -160,7 +160,7 @@ def text_findings(item: Item) -> list[Finding]:
         for rule, sev, msg in hits:
             if rule not in seen:  # one finding per rule per item, naming the first file
                 seen.add(rule)
-                out.append(Finding(rule, sev, key, f"{msg} ({rel})"))
+                out.append(Finding(rule, sev, key, f"{msg} ({rel})", file=rel))
 
     # R12: hidden folders, binaries or archives shipped inside a skill, command or agent.
     if item.kind in ("skill", "command", "agent"):

@@ -53,9 +53,13 @@ class Finding:
     severity: str  # high | medium | low
     key: str  # item key, as in the lock
     message: str  # never contains secret values
+    file: str | None = None  # file inside the item the finding is about, relative to the item's path
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d["file"] is None:
+            del d["file"]
+        return d
 
 
 def hash_bytes(data: bytes) -> str:

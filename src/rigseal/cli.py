@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rigseal import lock as lk
-from rigseal import rules, signing
+from rigseal import rules, sarif, signing
 from rigseal.cache import Cache, cache_path
 from rigseal.capabilities import enrich
 from rigseal.collectors import COLLECTORS
@@ -26,6 +26,7 @@ err = Console(stderr=True)
 ProjectOpt = Annotated[Path, typer.Option("--project", "-p", help="Project folder to inspect.", exists=True, file_okay=False)]
 HomeOpt = Annotated[Path, typer.Option(hidden=True)]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON.")]
+SarifOpt = Annotated[bool, typer.Option("--sarif", help="Print SARIF 2.1.0 (for GitHub code scanning).")]
 RepoOpt = Annotated[bool, typer.Option("--repo", help="Only the repo lock (for CI).")]
 KeyOpt = Annotated[Path | None, typer.Option("--key", help="SSH key to sign with (default: $RIGSEAL_SIGNING_KEY, then git user.signingkey).")]
 NoSignOpt = Annotated[bool, typer.Option("--no-sign", help="Do not sign.")]
@@ -229,6 +230,7 @@ def check(
     repo_only: RepoOpt = False,
     require_signature: Annotated[bool, typer.Option("--require-signature", help="Fail if a lock is unsigned.")] = False,
     as_json: JsonOpt = False,
+    as_sarif: SarifOpt = False,
     home: HomeOpt = Path.home(),
 ) -> None:
     """Exit 0 if nothing changed and signatures are valid, 1 if not, 2 on error."""
@@ -236,7 +238,10 @@ def check(
     found = changes(ctx, repo_only)
     findings = change_findings(ctx, found)
     problems = signature_problems(ctx, repo_only, require_signature)
-    if as_json:
+    if as_sarif:
+        flat = [f for fs in findings.values() for f in fs]
+        typer.echo(json.dumps(sarif.report(ctx.items, flat, found, ctx.project, problems), indent=2))
+    elif as_json:
         changes_json = [{**c.to_dict(), **_findings_json(findings, c.key)} for c in found]
         typer.echo(json.dumps({"changes": changes_json, "signature_problems": problems}, indent=2))
     else:
@@ -363,6 +368,7 @@ def scan(
     project: ProjectOpt = Path("."),
     fail_on: Annotated[str, typer.Option("--fail-on", help="Exit 1 at this severity or worse: high, medium, low, never.")] = "high",
     as_json: JsonOpt = False,
+    as_sarif: SarifOpt = False,
     home: HomeOpt = Path.home(),
 ) -> None:
     """Run the rules on everything your agents load, approved or not."""
@@ -370,10 +376,13 @@ def scan(
         raise _fail("--fail-on must be high, medium, low or never")
     home, proj = _paths(home, project)
     try:
-        findings = rules.scan(inventory(home, proj))
+        items = inventory(home, proj)
     except CollectError as e:
         raise _fail(str(e)) from e
-    if as_json:
+    findings = rules.scan(items)
+    if as_sarif:
+        typer.echo(json.dumps(sarif.report(items, findings, [], proj), indent=2))
+    elif as_json:
         typer.echo(json.dumps([f.to_dict() for f in findings], indent=2))
     else:
         for key in dict.fromkeys(f.key for f in findings):

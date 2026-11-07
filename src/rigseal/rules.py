@@ -143,7 +143,13 @@ def r15_hidden_unicode(item: Item) -> list[Finding]:
     if item.raw is not None and (in_cfg := hidden_chars(json.dumps(item.raw, ensure_ascii=False))):
         found["config"] = in_cfg
     return [
-        Finding("R15", "high", item_key(item), f"hidden characters in {where}: " + ", ".join(f"{k} x{n}" for k, n in kinds.items()))
+        Finding(
+            "R15",
+            "high",
+            item_key(item),
+            f"hidden characters in {where}: " + ", ".join(f"{k} x{n}" for k, n in kinds.items()),
+            file=None if where == "config" else where,
+        )
         for where, kinds in sorted(found.items())
     ]
 
