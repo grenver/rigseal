@@ -25,7 +25,6 @@ RULES = {
     "R15": "Hidden Unicode characters (tags, bidi controls, zero-width)",
     "R16": "npx/uvx/bunx package without a pinned version",
     "R18": "Uses shell or network without declaring it in allowed-tools",
-    "R19": "Prompt-injection classifier flagged this text",
 }
 LEVELS = {"high": "error", "medium": "warning", "low": "note"}
 SCORES = {"high": "8.0", "medium": "5.0", "low": "2.0"}
