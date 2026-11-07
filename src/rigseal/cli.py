@@ -37,6 +37,10 @@ def _notes(item: Item) -> str:
         parts.append("env: " + ", ".join(d["env_keys"]))
     if d.get("version"):
         parts.append(f"v{d['version']}")
+    if d.get("link"):
+        parts.append(f"-> {d['link']}")
+    if d.get("enabled") is False:
+        parts.append("disabled")
     if d.get("missing"):
         parts.append("install folder missing")
     if item.kind == "skill" and not d.get("has_skill_md"):
