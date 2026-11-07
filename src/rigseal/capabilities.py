@@ -9,7 +9,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from rigseal.cache import Cache
 from rigseal.model import Item
+from rigseal.text_rules import file_hits
 
 TEXT_KINDS = {"skill", "command", "agent", "rule", "instructions", "prompt", "plugin"}
 TEXT_SUFFIXES = {
@@ -46,8 +48,8 @@ SENSITIVE_HINTS = (
 # Characters people can't see but models read.
 HIDDEN = {
     "tag": re.compile("[\U000e0000-\U000e007f]"),
-    "bidi": re.compile("[‪-‮⁦-⁩]"),
-    "zero-width": re.compile("[​-‍⁠᠎]|(?<!^)﻿"),
+    "bidi": re.compile("[\u202a-\u202e\u2066-\u2069]"),
+    "zero-width": re.compile("[\u200b-\u200d\u2060\u180e]|(?<!^)\ufeff"),
 }
 
 
@@ -87,42 +89,74 @@ def _read(path: Path) -> str | None:
         return None
 
 
-def extract(item: Item) -> dict:
+def analyze_file(text: str, name: str, suffix: str) -> dict:
+    """Everything we learn from one file's text. Depends only on the text, name and suffix, so it can be cached."""
+    result: dict = {}
+    if found := hidden_chars(text, prose=suffix in PROSE_SUFFIXES or name == ".cursorrules"):
+        result["hidden"] = found
+    lowered = text.lower()
+    if any(h in lowered for h in SENSITIVE_HINTS):
+        if sensitive := sorted({m.group(0).lower() for m in SENSITIVE.finditer(text)}):
+            result["sensitive"] = sensitive
+
+    if suffix in SHELL_SUFFIXES or suffix in CODE_SUFFIXES:
+        code = text
+        shell = suffix in SHELL_SUFFIXES or bool(SHELL_IN_CODE.search(text))
+    else:
+        fences = FENCE.findall(text)
+        bangs = BANG_COMMAND.findall(text)
+        code = "\n".join([body for _, body in fences] + bangs)
+        shell = any(lang.lower() in SHELL_FENCES for lang, _ in fences) or bool(bangs)
+    if shell:
+        result["shell"] = True
+    if NETWORK.search(code):
+        result["network"] = True
+    if hosts := sorted({h.lower() for h in URL_HOST.findall(code)}):
+        result["hosts"] = hosts
+    if suffix == ".md":
+        fm = frontmatter(text)
+        if "allowed-tools" in fm or "tools" in fm:
+            result["tools"] = fm.get("allowed-tools", fm.get("tools"))
+    if hits := file_hits(text, suffix):
+        result["hits"] = [list(h) for h in hits]
+    return result
+
+
+def extract(item: Item, cache: Cache | None = None) -> dict:
+    """Capabilities for one item. Per-file analysis comes from the cache when the file's hash is known."""
     shell = network = False
     hosts: set[str] = set()
     sensitive: set[str] = set()
     hidden: dict[str, dict[str, int]] = {}
     allowed_tools: list[str] | None = None
+    hashes = {f.path: f.sha256 for f in item.files}
 
     for rel, full in item.text_files():
         if SKIP_DIRS.intersection(Path(rel).parts[:-1]):
             continue
-        text = _read(full)
-        if text is None:
-            continue
         suffix = full.suffix.lower()
-        if found := hidden_chars(text, prose=suffix in PROSE_SUFFIXES or full.name == ".cursorrules"):
-            hidden[rel] = found
-        lowered = text.lower()
-        if any(h in lowered for h in SENSITIVE_HINTS):
-            sensitive.update(m.group(0).lower() for m in SENSITIVE.finditer(text))
+        if suffix not in TEXT_SUFFIXES and full.name != ".cursorrules":
+            continue
+        ckey = f"{hashes[rel]}:{suffix or full.name}"
+        result = cache.get(ckey) if cache else None
+        if result is None:
+            text = _read(full)
+            if text is None:
+                continue
+            result = analyze_file(text, full.name, suffix)
+            if cache:
+                cache.put(ckey, result)
 
-        if suffix in SHELL_SUFFIXES or suffix in CODE_SUFFIXES:
-            code = text
-            shell = shell or suffix in SHELL_SUFFIXES or bool(SHELL_IN_CODE.search(text))
-        else:
-            fences = FENCE.findall(text)
-            code = "\n".join(body for _, body in fences)
-            shell = shell or any(lang.lower() in SHELL_FENCES for lang, _ in fences) or bool(BANG_COMMAND.search(text))
-            code += "\n".join(BANG_COMMAND.findall(text))
-        if NETWORK.search(code):
-            network = True
-        hosts.update(h.lower() for h in URL_HOST.findall(code))
-
-        if full.name in ("SKILL.md",) or (item.kind in ("command", "agent") and suffix == ".md"):
-            fm = frontmatter(text)
-            if "allowed-tools" in fm or "tools" in fm:
-                allowed_tools = fm.get("allowed-tools", fm.get("tools"))
+        if result.get("hits"):
+            item.file_hits.append((rel, [tuple(h) for h in result["hits"]]))
+        if result.get("hidden"):
+            hidden[rel] = result["hidden"]
+        sensitive.update(result.get("sensitive", ()))
+        shell = shell or bool(result.get("shell"))
+        network = network or bool(result.get("network"))
+        hosts.update(result.get("hosts", ()))
+        if "tools" in result and (full.name == "SKILL.md" or item.kind in ("command", "agent")):
+            allowed_tools = result["tools"]
 
     caps: dict = {}
     if shell:
@@ -140,8 +174,8 @@ def extract(item: Item) -> dict:
     return caps
 
 
-def enrich(items: list[Item]) -> None:
+def enrich(items: list[Item], cache: Cache | None = None) -> None:
     for item in items:
         if item.kind in TEXT_KINDS and item.files:
-            if caps := extract(item):
+            if caps := extract(item, cache):
                 item.details["capabilities"] = caps

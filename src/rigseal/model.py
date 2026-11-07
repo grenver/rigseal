@@ -31,10 +31,12 @@ class Item:
     details: dict = field(default_factory=dict)  # non-secret facts, shown to the user
     # The parsed config (MCP server, settings), for rules only. May hold secrets: never stored or printed.
     raw: object = field(default=None, repr=False, compare=False)
+    # Text-rule hits per file, (relative name, [(rule, severity, message)]), filled with capabilities.
+    file_hits: list[tuple[str, list[tuple[str, str, str]]]] = field(default_factory=list, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        del d["raw"]
+        del d["raw"], d["file_hits"]
         return d
 
     def text_files(self) -> list[tuple[str, Path]]:

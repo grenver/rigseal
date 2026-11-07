@@ -20,7 +20,7 @@ def write(path: Path, text: str) -> None:
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
-    for var in ("CODEX_HOME", "RIGSEAL_DIR", "RIGSEAL_SIGNING_KEY"):
+    for var in ("CODEX_HOME", "RIGSEAL_DIR", "RIGSEAL_SIGNING_KEY", "XDG_CACHE_HOME"):
         monkeypatch.delenv(var, raising=False)
     # Keep the real git config (signing key, email) out of the tests.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))

@@ -30,11 +30,23 @@ rigseal check --repo --require-signature   # in CI: repo lock only, must be sign
 | R1 | high | an MCP server added, removed or changed without approval |
 | R2 | high | MCP server runs inline shell or interpreter code (`bash -c`, `python -c`), pipes a download into a shell, or lives in a temp folder |
 | R3 | high | project settings that approve themselves: `enableAllProjectMcpServers`, `enabledMcpjsonServers`, `Bash(*)`, `bypassPermissions`, hooks, `apiKeyHelper`, `*_BASE_URL`/proxy env; Codex `approval_policy = never`, `danger-full-access`, `model_providers`, hooks; Cursor hooks |
+| R7 | high | "install this prerequisite first" next to a direct download (archive, binary, release asset, paste site, shortener, raw IP) |
+| R8 | high | an encoded blob (base64, hex) plus something that decodes it |
+| R9 | medium | a password-protected archive with the password in the text |
+| R10 | high | reverse shell patterns (`/dev/tcp`, `nc -e`, `bash -i >&`, socket + `dup2`/`pty.spawn`) |
+| R11 | high | code that touches keys, wallets or browser data and makes a network call |
+| R12 | medium | a skill, command or agent that ships a hidden folder, a binary or an archive |
+| R13 | high | words mixing Latin and Cyrillic letters (look-alike spoofing) |
+| R14 | high/medium | decodes code and runs it (high); pipes a download into a shell (medium, common in install docs) |
 | R15 | high | hidden characters: Unicode tags anywhere; bidi and zero-width in instruction files and MCP config |
 | R16 | medium | `npx`/`uvx`/`bunx`/`pnpm dlx` package without a pinned version |
 | R18 | low/medium | skill, command or agent uses shell or network but `allowed-tools` doesn't declare it |
 
-Each skill, command, agent, rule and plugin also gets a capability summary (shell, network, hosts in code, sensitive paths like `~/.ssh`, `allowed-tools`). It is locked, so `diff` shows lines like `+ host evil.io` or `+ shell`. Vendored folders (`node_modules`, `.venv`, `.git`) are hashed but not read for capabilities. Findings name the pattern that matched, never config values.
+Each skill, command, agent, rule and plugin also gets a capability summary (shell, network, hosts in code, sensitive paths like `~/.ssh`, `allowed-tools`). It is locked, so `diff` shows lines like `+ host evil.io` or `+ shell`. Vendored folders (`node_modules`, `.venv`, `.git`) are hashed but not read for capabilities. Findings name the pattern that matched, never config values. Text is folded (NFKC + look-alike letters) before matching, so `curl` spelled with a Cyrillic `с` still matches.
+
+Per-file results are cached in `~/.cache/rigseal/` by file hash, so only new or changed files are read again.
+
+**How well do the rules work?** See [docs/eval.md](docs/eval.md): on MaliciousSkillBench's held-out test split, rules alone catch 2.7% of malicious skills at HIGH with 0.7% false alarms. Rules are a helper; the lock is the product.
 
 `rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
 
@@ -65,6 +77,8 @@ Skill folders are hashed file by file, dotfiles included. Symlinked skills are l
 ```sh
 uv sync
 uv run pytest
+uv run --group eval python evals/fetch.py      # eval data into ~/.cache/rigseal-eval
+uv run --group eval python evals/run.py --split train
 ```
 
 ## License

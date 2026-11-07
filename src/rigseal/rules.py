@@ -14,6 +14,7 @@ from pathlib import PurePath
 from rigseal.capabilities import hidden_chars
 from rigseal.lock import item_key
 from rigseal.model import Finding, Item
+from rigseal.text_rules import text_findings
 
 SEVERITIES = ("high", "medium", "low")
 
@@ -164,7 +165,14 @@ def r18_undeclared(item: Item) -> list[Finding]:
     return []
 
 
-RULES: list[Callable[[Item], list[Finding]]] = [r2_risky_stdio, r3_self_approving_project, r15_hidden_unicode, r16_unpinned_runner, r18_undeclared]
+RULES: list[Callable[[Item], list[Finding]]] = [
+    r2_risky_stdio,
+    r3_self_approving_project,
+    r15_hidden_unicode,
+    r16_unpinned_runner,
+    r18_undeclared,
+    text_findings,
+]
 
 
 def scan(items: list[Item]) -> list[Finding]:

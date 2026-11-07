@@ -11,6 +11,7 @@ from rich.table import Table
 
 from rigseal import lock as lk
 from rigseal import rules, signing
+from rigseal.cache import Cache, cache_path
 from rigseal.capabilities import enrich
 from rigseal.collectors import COLLECTORS
 from rigseal.model import CollectError, Finding, Item
@@ -37,7 +38,9 @@ def inventory(home: Path, project: Path | None) -> list[Item]:
     items: list[Item] = []
     for collect in COLLECTORS:
         items += collect(home, project)
-    enrich(items)
+    cache = Cache(cache_path(home))
+    enrich(items, cache)
+    cache.save()
     return items
 
 

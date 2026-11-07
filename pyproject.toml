@@ -15,6 +15,9 @@ rigseal = "rigseal.cli:app"
 
 [dependency-groups]
 dev = ["pytest>=8"]
+eval = [
+    "pyarrow>=26.0.1",
+]
 
 [build-system]
 requires = ["hatchling"]
