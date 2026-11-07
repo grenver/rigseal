@@ -19,7 +19,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 out = Console()
 err = Console(stderr=True)
 
-ProjectOpt = Annotated[Path, typer.Option("--project", "-p", help="Project folder to inspect.")]
+ProjectOpt = Annotated[Path, typer.Option("--project", "-p", help="Project folder to inspect.", exists=True, file_okay=False)]
 HomeOpt = Annotated[Path, typer.Option(hidden=True)]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON.")]
 RepoOpt = Annotated[bool, typer.Option("--repo", help="Only the repo lock (for CI).")]

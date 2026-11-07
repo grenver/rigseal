@@ -14,6 +14,7 @@ class SignError(Exception):
 
 
 def _git_config(key: str, cwd: Path | None = None) -> str | None:
+    cwd = cwd if cwd and cwd.is_dir() else None
     try:
         out = subprocess.run(["git", "config", "--get", key], cwd=cwd, capture_output=True, text=True, check=False)
     except FileNotFoundError:

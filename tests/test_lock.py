@@ -232,3 +232,16 @@ def test_unsigned_lock_fails_only_when_required(env):
     assert cli(env, "check").exit_code == 0
     r = cli(env, "check", "--require-signature")
     assert r.exit_code == 1 and "is not signed" in r.output
+
+
+def test_missing_project_folder_is_error(env, tmp_path):
+    home, _ = env
+    r = run(app, ["init", "--no-sign", "--home", str(home), "-p", str(tmp_path / "nope")])
+    assert r.exit_code == 2
+    assert not (home / ".rigseal/machine.lock").exists()
+
+
+def test_identity_ignores_missing_cwd(tmp_path):
+    from rigseal.signing import identity
+
+    assert identity(tmp_path / "nope") == "dev@example.com"
