@@ -1,26 +1,26 @@
 name: rigseal check
-description: Fail the PR when agent skills, plugins, hooks or MCP servers change without an approved rigseal.lock
+description: "Fail the PR when agent skills, plugins, hooks or MCP servers change without an approved rigseal.lock"
 branding:
   icon: lock
   color: gray-dark
 
 inputs:
   require-signature:
-    description: Fail if rigseal.lock is not signed by someone in .rigseal/allowed_signers
+    description: "Fail if rigseal.lock is not signed by someone in .rigseal/allowed_signers"
     default: "false"
   upload-sarif:
-    description: Upload findings to GitHub code scanning (needs `security-events: write`; private repos need GitHub Advanced Security)
+    description: "Upload findings to GitHub code scanning (needs `security-events: write`; private repos need GitHub Advanced Security)"
     default: "false"
   comment:
-    description: Post or update one PR comment with the drift (needs `pull-requests: write`)
+    description: "Post or update one PR comment with the drift (needs `pull-requests: write`)"
     default: "true"
   working-directory:
-    description: Folder that holds rigseal.lock
+    description: "Folder that holds rigseal.lock"
     default: "."
 
 outputs:
   exit-code:
-    description: 0 no drift, 1 drift or signature problem, 2 error
+    description: "0 no drift, 1 drift or signature problem, 2 error"
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
