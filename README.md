@@ -2,7 +2,7 @@
 
 A lockfile for your AI agent setup. Pin every skill, plugin, hook and MCP server your coding agents load, and see when anything changes. Runs 100% local.
 
-Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. Lockfile and diff come next.
+Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. It can lock that state, show drift, and sign the locks with your SSH key.
 
 ## Install
 
@@ -14,9 +14,22 @@ uv tool install git+https://github.com/jayhemnani9910/rigseal
 
 ```sh
 rigseal status              # inventory for your user config + the current repo
-rigseal status --json       # same, as JSON
-rigseal status -p ../other  # inventory for another project
+rigseal init                # lock it: ~/.rigseal/machine.lock, and rigseal.lock in the repo
+rigseal diff                # what changed since you approved
+rigseal approve [KEY...]    # accept changes (all, or just these keys)
+rigseal check               # exit 0 clean, 1 drift or bad signature, 2 error
+rigseal check --repo --require-signature   # in CI: repo lock only, must be signed
 ```
+
+`rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
+
+**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock), in git's allowed-signers format:
+
+```
+you@example.com namespaces="rigseal" ssh-ed25519 AAAA...
+```
+
+Format details: [docs/lockfile.md](docs/lockfile.md).
 
 rigseal only reads files. It never runs MCP servers, and it never prints secret values: env vars, args and headers are hashed, and only their key names are shown.
 

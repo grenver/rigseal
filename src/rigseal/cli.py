@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -8,10 +9,22 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from rigseal import lock as lk
+from rigseal import signing
 from rigseal.collectors import COLLECTORS
 from rigseal.model import CollectError, Item
+from rigseal.signing import SignError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+out = Console()
+err = Console(stderr=True)
+
+ProjectOpt = Annotated[Path, typer.Option("--project", "-p", help="Project folder to inspect.")]
+HomeOpt = Annotated[Path, typer.Option(hidden=True)]
+JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON.")]
+RepoOpt = Annotated[bool, typer.Option("--repo", help="Only the repo lock (for CI).")]
+KeyOpt = Annotated[Path | None, typer.Option("--key", help="SSH key to sign with (default: $RIGSEAL_SIGNING_KEY, then git user.signingkey).")]
+NoSignOpt = Annotated[bool, typer.Option("--no-sign", help="Do not sign.")]
 
 
 @app.callback()
@@ -24,6 +37,89 @@ def inventory(home: Path, project: Path | None) -> list[Item]:
     for collect in COLLECTORS:
         items += collect(home, project)
     return items
+
+
+def _fail(message: str) -> typer.Exit:
+    err.print(f"[red]error:[/red] {message}")
+    return typer.Exit(2)
+
+
+def _paths(home: Path, project: Path) -> tuple[Path, Path | None]:
+    """Resolve paths. The project is None when it is the home folder itself, so user config isn't counted twice."""
+    home, project = home.expanduser().resolve(), project.resolve()
+    return home, None if project == home else project
+
+
+@dataclass
+class Ctx:
+    home: Path
+    project: Path | None
+    current: lk.Current
+    repo: lk.Lock | None
+    machine: lk.Lock | None
+
+    @property
+    def project_key(self) -> str:
+        return str(self.project) if self.project else ""
+
+
+def load(home: Path, project: Path) -> Ctx:
+    home, proj = _paths(home, project)
+    try:
+        current = lk.split(inventory(home, proj), home, proj or home)
+        repo = lk.read_lock(lk.repo_lock_path(proj)) if proj else None
+        machine = lk.read_lock(lk.machine_lock_path(home))
+    except CollectError as e:
+        raise _fail(str(e)) from e
+    return Ctx(home, proj, current, repo, machine)
+
+
+def changes(ctx: Ctx, repo_only: bool) -> list[lk.Change]:
+    """Drift against the locks. A missing repo lock counts as empty, so a fresh clone's MCP servers show as added."""
+    result = lk.diff_entries(ctx.repo.items if ctx.repo else {}, ctx.current.repo, "repo")
+    if not repo_only:
+        if ctx.machine is None:
+            raise _fail(f"no machine lock at {lk.machine_lock_path(ctx.home)}. Run `rigseal init` first.")
+        result += lk.diff_entries(ctx.machine.items, ctx.current.machine, "machine")
+        result += lk.diff_entries(ctx.machine.projects.get(ctx.project_key, {}), ctx.current.local, "machine")
+    return result
+
+
+def signature_problems(ctx: Ctx, repo_only: bool, require: bool) -> list[str]:
+    targets = []
+    if ctx.repo and ctx.project:
+        targets.append((ctx.repo, ctx.project / ".rigseal" / "allowed_signers"))
+    if ctx.machine and not repo_only:
+        targets.append((ctx.machine, lk.rigseal_dir(ctx.home) / "allowed_signers"))
+
+    problems = []
+    for lock, default_signers in targets:
+        if not lock.sig_path.exists():
+            if lock.signed_by:
+                problems.append(f"{lock.path} says it is signed by {lock.signed_by} but {lock.sig_path.name} is missing")
+            elif require:
+                problems.append(f"{lock.path} is not signed")
+        elif not lock.signed_by:
+            problems.append(f"{lock.path} has a signature but no signedBy")
+        else:
+            try:
+                signing.verify(lock.path, lock.signed_by, signing.allowed_signers_for(default_signers, ctx.project))
+            except SignError as e:
+                problems.append(str(e))
+    return problems
+
+
+def print_changes(found: list[lk.Change]) -> None:
+    marks = {"added": "[green]+[/green]", "removed": "[red]-[/red]", "changed": "[yellow]~[/yellow]"}
+    for c in found:
+        out.print(f"{marks[c.status]} {c.key}  [dim]({c.lock} lock, {c.status})[/dim]")
+        if c.status != "changed":
+            continue
+        for label, files in (("changed", c.files_changed), ("new file", c.files_added), ("gone", c.files_removed)):
+            for f in files:
+                out.print(f"    {label}: {f}")
+        if c.details_changed:
+            out.print(f"    details: {', '.join(c.details_changed)}")
 
 
 def _notes(item: Item) -> str:
@@ -49,17 +145,13 @@ def _notes(item: Item) -> str:
 
 
 @app.command()
-def status(
-    project: Annotated[Path, typer.Option("--project", "-p", help="Project folder to inspect.")] = Path("."),
-    as_json: Annotated[bool, typer.Option("--json", help="Print JSON.")] = False,
-    home: Annotated[Path, typer.Option(hidden=True)] = Path.home(),
-) -> None:
+def status(project: ProjectOpt = Path("."), as_json: JsonOpt = False, home: HomeOpt = Path.home()) -> None:
     """Show every skill, plugin, hook and MCP server your agents load."""
+    home, proj = _paths(home, project)
     try:
-        items = inventory(home, project.resolve())
+        items = inventory(home, proj)
     except CollectError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2) from e
+        raise _fail(str(e)) from e
 
     if as_json:
         typer.echo(json.dumps([i.to_dict() for i in items], indent=2))
@@ -70,5 +162,117 @@ def status(
         table.add_column(col, overflow="fold")
     for i in items:
         table.add_row(i.agent, i.scope, i.kind, i.name, str(len(i.files)), i.sha256[:12], _notes(i))
-    Console().print(table)
+    out.print(table)
     typer.echo(f"{len(items)} items")
+
+
+@app.command()
+def diff(project: ProjectOpt = Path("."), repo_only: RepoOpt = False, as_json: JsonOpt = False, home: HomeOpt = Path.home()) -> None:
+    """Show what changed since the last approve."""
+    ctx = load(home, project)
+    found = changes(ctx, repo_only)
+    if as_json:
+        typer.echo(json.dumps([c.to_dict() for c in found], indent=2))
+    elif found:
+        print_changes(found)
+    else:
+        out.print("no drift")
+
+
+@app.command()
+def check(
+    project: ProjectOpt = Path("."),
+    repo_only: RepoOpt = False,
+    require_signature: Annotated[bool, typer.Option("--require-signature", help="Fail if a lock is unsigned.")] = False,
+    as_json: JsonOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Exit 0 if nothing changed and signatures are valid, 1 if not, 2 on error."""
+    ctx = load(home, project)
+    found = changes(ctx, repo_only)
+    problems = signature_problems(ctx, repo_only, require_signature)
+    if as_json:
+        typer.echo(json.dumps({"changes": [c.to_dict() for c in found], "signature_problems": problems}, indent=2))
+    else:
+        for p in problems:
+            out.print(f"[red]signature:[/red] {p}")
+        print_changes(found)
+        out.print(f"{len(found)} change(s), {len(problems)} signature problem(s)" if found or problems else "ok")
+    if found or problems:
+        raise typer.Exit(1)
+
+
+def _save(lock: lk.Lock, key: Path | None, signer: str) -> str:
+    """Write the lock, then sign it if there is a key. An old signature is removed, since it no longer matches."""
+    lock.signed_by = signer if key else None
+    lock.write()
+    if key is None:
+        lock.sig_path.unlink(missing_ok=True)
+        return f"wrote {lock.path} [yellow](unsigned)[/yellow]"
+    signing.sign(lock.path, key)
+    return f"wrote and signed {lock.path}"
+
+
+def _approve(ctx: Ctx, keys: set[str] | None, key: Path | None) -> list[str]:
+    who, when = signing.identity(ctx.project), lk.now()
+    notes = []
+    if ctx.project and (ctx.repo or ctx.current.repo):
+        old = ctx.repo or lk.Lock(lk.repo_lock_path(ctx.project))
+        new_items = lk.apply(old.items, ctx.current.repo, keys, who, when)
+        if ctx.repo is None or new_items != old.items:
+            notes.append(_save(lk.Lock(old.path, new_items), key, who))
+
+    old_m = ctx.machine or lk.Lock(lk.machine_lock_path(ctx.home))
+    new_m = lk.apply(old_m.items, ctx.current.machine, keys, who, when)
+    projects = dict(old_m.projects)
+    if ctx.project:
+        projects[ctx.project_key] = lk.apply(projects.get(ctx.project_key, {}), ctx.current.local, keys, who, when)
+    if ctx.machine is None or new_m != old_m.items or projects != old_m.projects:
+        notes.append(_save(lk.Lock(old_m.path, new_m, projects), key, who))
+    return notes
+
+
+def _run_approve(ctx: Ctx, keys: set[str] | None, key: Path | None, no_sign: bool) -> None:
+    sign_key = None if no_sign else signing.signing_key(key, ctx.project)
+    try:
+        for note in _approve(ctx, keys, sign_key):
+            out.print(note)
+    except SignError as e:
+        raise _fail(str(e)) from e
+
+
+@app.command()
+def init(
+    project: ProjectOpt = Path("."),
+    force: Annotated[bool, typer.Option("--force", help="Overwrite existing locks.")] = False,
+    key: KeyOpt = None,
+    no_sign: NoSignOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Write the machine lock, and the repo lock if this project has agent config."""
+    ctx = load(home, project)
+    existing = [str(lock.path) for lock in (ctx.repo, ctx.machine) if lock]
+    if existing and not force:
+        raise _fail(f"lock already exists: {', '.join(existing)}. Use `rigseal approve`, or --force.")
+    ctx.repo = ctx.machine = None
+    _run_approve(ctx, None, key, no_sign)
+
+
+@app.command()
+def approve(
+    keys: Annotated[list[str] | None, typer.Argument(help="Item keys to approve (default: all changes).")] = None,
+    project: ProjectOpt = Path("."),
+    key: KeyOpt = None,
+    no_sign: NoSignOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Accept the current state into the locks."""
+    ctx = load(home, project)
+    pending = changes(ctx, repo_only=False)
+    wanted = set(keys) if keys else None
+    if wanted and (unknown := wanted - {c.key for c in pending}):
+        raise _fail(f"not a pending change: {', '.join(sorted(unknown))}. See `rigseal diff`.")
+    if not pending:
+        out.print("nothing to approve")
+        return
+    _run_approve(ctx, wanted, key, no_sign)
