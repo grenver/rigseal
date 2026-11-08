@@ -1,147 +1,99 @@
 # rigseal
 
-A lockfile for your AI agent setup. Pin every skill, plugin, hook and MCP server your coding agents load, and see when anything changes. Runs 100% local.
+A lockfile for your AI agent setup.
 
-![An MCP server is rewritten, rigseal flags it in under a second, and the agent's tool call is denied](docs/demo.gif)
+Your agents load skills, plugins, hooks and MCP servers. Any of them can change without you knowing. rigseal pins them all and blocks a changed MCP server until you approve it. Runs 100% local.
 
-<a href="https://github.com/jayhemnani9910/rigseal/releases/download/v0.1.0/rigseal-howto.mp4"><img src="docs/how-to-poster.jpg" width="480" alt="Watch the one-minute guide"></a>
+![An MCP server is rewritten, rigseal flags it, and the agent's tool call is denied](docs/demo.gif)
 
-**[Watch the one-minute guide](https://github.com/jayhemnani9910/rigseal/releases/download/v0.1.0/rigseal-howto.mp4)**: what rigseal is and how to use it.
-
-Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. It can lock that state, show drift, block changed MCP servers, and sign the locks with your SSH key.
-
-## Try it
-
-See what your agents load. This reads files and changes nothing:
-
-```sh
-uvx --from git+https://github.com/jayhemnani9910/rigseal rigseal status
-```
+[One-minute guide (mp4)](https://github.com/jayhemnani9910/rigseal/releases/download/v0.1.0/rigseal-howto.mp4)
 
 ## Install
+
+Needs [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv tool install git+https://github.com/jayhemnani9910/rigseal
 rigseal setup
 ```
 
-`setup` shows what it will do and asks first. It adds rigseal's hooks to the agents you use (Claude Code, Cursor) and locks what they load today. After that, a changed MCP server is blocked until you approve it.
+`setup` shows what it will do and asks first. It adds the hooks and locks what your agents load today.
 
-## Use
+To look first, this reads files and changes nothing:
 
 ```sh
-rigseal status              # summary: items, drift, findings, hooks (--all lists every item)
-rigseal setup               # hooks + locks, in one step
-rigseal init                # only the locks: ~/.rigseal/machine.lock, and rigseal.lock in the repo
-rigseal diff                # what changed since you approved
-rigseal approve [KEY...]    # show changes and ask, then accept them (all, or just these keys)
-rigseal check               # exit 0 clean, 1 drift or bad signature, 2 error
-rigseal check --repo --require-signature   # in CI: repo lock only, must be signed
+uvx --from git+https://github.com/jayhemnani9910/rigseal rigseal status
 ```
 
-`rigseal scan` runs the rules on everything, approved or not, and exits 1 on any HIGH finding (`--fail-on medium|low|never` to change that). Low findings are hidden unless you pass `--all`. `diff` and `check` show the same findings on items that were added or changed. A changed plugin shows file counts and any new capabilities; `rigseal diff --files` lists its files.
+## Quick start
 
-## Watch and hooks
-
-`rigseal watch` checks file stats every 0.5 s and prints drift as soon as it appears, and again when it is approved or reverted. A rewritten `.mcp.json` shows up in under a second.
-
-`rigseal hook claude-code` and `rigseal hook cursor` run as agent hooks. A drifted MCP server (added, changed or removed since approve) gets its tool calls denied, and so does every MCP call if that agent's own config or a lock can't be read. A lock that fails its signature approves nothing. Other drift is reported. Until `rigseal init` has run, hooks only say that rigseal is not set up; they never block. Each call takes about a second (a full check).
-
-`rigseal setup` adds these for you. To add them by hand instead, for Claude Code, in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [{ "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }],
-    "PreToolUse": [{ "matcher": "mcp__.*", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }],
-    "ConfigChange": [{ "matcher": "user_settings|project_settings|local_settings|skills", "hooks": [{ "type": "command", "command": "rigseal hook claude-code", "timeout": 30 }] }]
-  }
-}
+```sh
+rigseal status     # what's loaded, what changed
+rigseal diff       # what changed, and why it's risky
+rigseal approve    # you made the change, accept it
 ```
 
-- `SessionStart`: shows you the drift and tells the agent to treat changed items as untrusted. It can't block.
-- `PreToolUse`: denies calls to a drifted MCP server. `.mcp.json` and `~/.claude.json` have no config-change event, so this is the gate.
-- `ConfigChange`: keeps a drifted settings or skill file out of the running session. Claude Code shows no message when it blocks; run `rigseal diff`.
+Didn't make the change? Undo it, and rigseal goes back to clean.
 
-Cursor, in `~/.cursor/hooks.json`:
-
-```json
-{
-  "version": 1,
-  "hooks": {
-    "sessionStart": [{ "command": "rigseal hook cursor" }],
-    "beforeMCPExecution": [{ "command": "rigseal hook cursor", "failClosed": true }]
-  }
-}
+```sh
+git restore .mcp.json
 ```
 
-Adding these by hand changes your settings, so approve once afterwards.
+## How it works
 
-## Rules
+1. `setup` hashes everything your agents load into two locks. `rigseal.lock` is for the repo, commit it. `~/.rigseal/machine.lock` stays on your laptop.
+2. Hooks check those locks when a session starts and before every MCP call. A changed server gets denied. Other changes get reported.
+3. If you have an SSH signing key, the locks are signed. A lock that fails its signature approves nothing.
+4. `approve` needs a person at a terminal, so your agent can't run it for you.
 
-| Rule | Severity | Flags |
+## Agents
+
+| Agent | Tracks changes | Blocks changed MCP servers |
 |---|---|---|
-| R1 | high | an MCP server added, removed or changed without approval |
-| R2 | high | MCP server runs inline shell or interpreter code (`bash -c`, `python -c`), pipes a download into a shell, or lives in a temp folder |
-| R3 | high | project settings that approve themselves: `enableAllProjectMcpServers`, `enabledMcpjsonServers`, `Bash(*)`, `bypassPermissions`, hooks, `apiKeyHelper`, `*_BASE_URL`/proxy env; Codex `approval_policy = never`, `danger-full-access`, `model_providers`, hooks; Cursor hooks |
-| R7 | high | "install this prerequisite first" next to a direct download (archive, binary, release asset, paste site, shortener, raw IP) |
-| R8 | high | an encoded blob (base64, hex) plus something that decodes it |
-| R9 | medium | a password-protected archive with the password in the text |
-| R10 | high | reverse shell patterns (`/dev/tcp`, `nc -e`, `bash -i >&`, socket + `dup2`/`pty.spawn`) |
-| R11 | high | code that touches keys, wallets or browser data and makes a network call |
-| R12 | medium | a skill, command or agent that ships a hidden folder, a binary or an archive |
-| R13 | high | words mixing Latin and Cyrillic letters (look-alike spoofing) |
-| R14 | high/medium | decodes code and runs it (high); pipes a download into a shell (medium, common in install docs) |
-| R15 | high | hidden characters: Unicode tags anywhere; bidi and zero-width in instruction files and MCP config |
-| R16 | medium | `npx`/`uvx`/`bunx`/`pnpm dlx` package without a pinned version |
-| R18 | low/medium | skill, command or agent uses shell or network but `allowed-tools` doesn't declare it |
+| Claude Code | yes | yes |
+| Cursor | yes | yes |
+| Codex | yes | no |
+| VS Code / Copilot | yes | no |
 
-Each skill, command, agent, rule and plugin also gets a capability summary (shell, network, hosts in code, sensitive paths like `~/.ssh`, `allowed-tools`). It is locked, so `diff` shows lines like `+ host evil.io` or `+ shell`. Vendored folders (`node_modules`, `.venv`, `.git`) are hashed but not read for capabilities. Findings name the pattern that matched, never config values. Text is folded (NFKC + look-alike letters) before matching, so `curl` spelled with a Cyrillic `с` still matches.
+`~/.agents/skills` is tracked too.
 
-Per-file results are cached in `~/.cache/rigseal/` by file hash, so only new or changed files are read again.
+## Commands
 
-**How well do the rules work?** See [docs/eval.md](docs/eval.md): on MaliciousSkillBench's held-out test split, rules alone catch 2.7% of malicious skills at HIGH with 0.7% false alarms. Rules are a helper; the lock is the product.
-
-`rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
-
-**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The first `setup` or `init` adds your own key to `~/.rigseal/allowed_signers` if that file doesn't exist. The format is git's allowed-signers:
-
-```
-you@example.com namespaces="rigseal" ssh-ed25519 AAAA...
-```
-
-Format details: [docs/lockfile.md](docs/lockfile.md).
-
-rigseal only reads files. It never runs MCP servers, and it never prints secret values: env vars, args and headers are hashed, and only their key names are shown.
-
-`approve` and `init` need a person at a terminal (set `RIGSEAL_NONINTERACTIVE=1` in CI). A signed lock can't be replaced by an unsigned one without `--allow-unsigned`, and once an `allowed_signers` file exists, `check` requires a valid signature. Read [docs/threat-model.md](docs/threat-model.md) for what this does and does not stop: the short version is that approvals are only as safe as a signing key the agent can't use.
-
-In a project, symlinks that leave the repo are recorded but not followed (R12). Folders stop hashing at 20,000 files or 500 MB, and configs over 10 MB or that aren't regular files are refused.
-
-## What it reads
-
-| Agent | Where |
+| Command | What it does |
 |---|---|
-| Claude Code | `~/.claude/settings.json`, `.claude/settings{,.local}.json`, `~/.claude.json` (user + per-project MCP), `.mcp.json`, `skills/*/`, `commands/**/*.md`, `agents/**/*.md`, `~/.claude/plugins/installed_plugins.json` + install folders, synced plugins and skills (`plugins/synced/`, `skills/synced/`), MCP servers that plugins ship (`.mcp.json` or `plugin.json` `mcpServers`), `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` |
-| Codex | `~/.codex/config.toml` (or `$CODEX_HOME`) and `.codex/config.toml`: settings, `mcp_servers`, hooks; `skills/*/` incl. `.system/`; `plugins/cache/<market>/<plugin>/` and each plugin's `.mcp.json`; `rules/*.rules`; `AGENTS.md` |
-| Cursor | `~/.cursor/` and `.cursor/`: `mcp.json`, `hooks.json`, `skills/*/`, `rules/**/*.mdc`; `.cursorrules` |
-| VS Code / Copilot | VS Code user `mcp.json` + `prompts/` (Linux and macOS paths), `.vscode/mcp.json`, `.github/copilot-instructions.md`, `.github/{instructions,prompts}/`, `.github/skills/`; `~/.copilot/mcp-config.json`, `skills/`, `installed-plugins/` |
-| Shared | `~/.agents/skills/*/`, `.agents/skills/*/` |
+| `rigseal status` | Summary. `--all` lists every item |
+| `rigseal setup` | Add hooks, write locks |
+| `rigseal diff` | What changed since you approved |
+| `rigseal approve` | Accept changes |
+| `rigseal check` | For scripts. Exit 0 clean, 1 changed, 2 error |
+| `rigseal scan` | Run the rules on everything |
+| `rigseal watch` | Print changes as they happen |
 
-Skill folders are hashed file by file, dotfiles included. Symlinked skills are listed under each agent that loads them, with the link target shown. JSON files with comments (VS Code, Copilot) are read too.
+## On a team
 
-## Develop
+Commit `rigseal.lock`. This fails any PR that changes agent config without approving it:
 
-```sh
-uv sync
-uv run pytest
-uv run --group eval python evals/fetch.py      # eval data into ~/.cache/rigseal-eval
-uv run --group eval python evals/run.py --split train
-uv run python evals/dogfood.py log      # one check, appended to ~/.rigseal/dogfood.jsonl (run daily)
-uv run python evals/dogfood.py report   # drift events per week, and how many were plugin updates
+```yaml
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  rigseal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jayhemnani9910/rigseal@v0.1.0
 ```
 
-claude.ai connectors (Gmail, Drive, ...) are configured on your account, not on disk, so rigseal can't see them.
+## Good to know
+
+- rigseal only reads files. It never runs an MCP server and never prints secret values.
+- The scan rules are a helper. On a public benchmark they catch [2.7% of malicious skills](docs/eval.md). The lock is the product.
+- Approvals are only as safe as a signing key your agent can't use. See the [threat model](docs/threat-model.md).
+- claude.ai connectors live on your account, not on disk, so rigseal can't see them.
+
+Rules, manual hook setup, signing and every path it reads: [docs/reference.md](docs/reference.md).
 
 ## License
 
