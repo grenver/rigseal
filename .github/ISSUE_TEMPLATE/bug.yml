@@ -1,0 +1,41 @@
+name: Bug
+description: rigseal crashed, missed a change, or flagged something wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Please don't paste secrets. If this is a way to get past rigseal, use **Report a vulnerability** on the Security tab instead."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest config that shows it, with values replaced.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Install source and commit
+      description: For example `uv tool install` from main, and the commit.
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      multiple: true
+      options: [Claude Code, Codex, Cursor, VS Code / Copilot, Shared skills folder, Not agent specific]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true

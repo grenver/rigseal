@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +17,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from rigseal import lock as lk
-from rigseal import hooks, rules, sarif, signing
+from rigseal import hook_config, hooks, rules, sarif, signing
 from rigseal import watch as wt
 from rigseal.cache import Cache, cache_path
 from rigseal.capabilities import enrich
@@ -209,7 +211,7 @@ def finding_line(f: Finding) -> str:
     return f"[{SEV_STYLE[f.severity]}]{f.severity.upper():6}[/] {f.rule:4} {safe(f.message)}"
 
 
-def print_changes(found: list[lk.Change], findings: dict[str, list[Finding]]) -> None:
+def print_changes(found: list[lk.Change], findings: dict[str, list[Finding]], all_files: bool = False) -> None:
     marks = {"added": "[green]+[/green]", "removed": "[red]-[/red]", "changed": "[yellow]~[/yellow]"}
     for c in found:
         out.print(f"{marks[c.status]} {safe(c.key)}  [dim]({c.lock} lock, {c.status})[/dim]")
@@ -217,9 +219,17 @@ def print_changes(found: list[lk.Change], findings: dict[str, list[Finding]]) ->
             out.print(f"    {finding_line(f)}")
         if c.status != "changed":
             continue
-        for label, files in (("changed", c.files_changed), ("new file", c.files_added), ("gone", c.files_removed)):
-            for f in files:
-                out.print(f"    {label}: {safe(f)}")
+        groups = (("changed", c.files_changed), ("new file", c.files_added), ("gone", c.files_removed))
+        if c.key.split("/", 3)[2] == "plugin" and not all_files:  # a plugin update touches many files; what it can now do matters more
+            counts = ", ".join(f"{len(files)} {label}" for label, files in groups if files)
+            if counts:
+                out.print(f"    files: {counts} [dim](`rigseal diff --files` lists them)[/dim]")
+            if not c.capabilities:
+                out.print("    [dim]no new capabilities detected[/dim]")
+        else:
+            for label, files in groups:
+                for f in files:
+                    out.print(f"    {label}: {safe(f)}")
         for line in c.capabilities:
             out.print(f"    [bold]{safe(line)}[/bold]")
         other = [d for d in c.details_changed if d != "capabilities"]
@@ -249,9 +259,37 @@ def _notes(item: Item) -> str:
     return "; ".join(parts)
 
 
+def _print_summary(ctx: Ctx) -> None:
+    by_agent = Counter(i.agent for i in ctx.items)
+    out.print(f"{len(ctx.items)} items: " + ", ".join(f"{agent} {n}" for agent, n in sorted(by_agent.items())))
+    if ctx.machine is None:
+        out.print("locks: [yellow]not set up[/yellow], run `rigseal setup`")
+    else:
+        found, note = drift(ctx)
+        if note:
+            out.print(f"[red]signature:[/red] {safe(note)}")
+        out.print(f"locks: [yellow]{len(found)} changed[/yellow], run `rigseal diff`" if found else "locks: [green]0 changed[/green]")
+    counts = Counter(f.severity for f in rules.scan(ctx.items))
+    out.print("findings: " + ", ".join(f"{counts[s]} {s}" for s in rules.SEVERITIES) + (", run `rigseal scan`" if counts else ""))
+    try:
+        hook_state = [f"{t.agent} {'[yellow]missing[/yellow]' if hook_config.missing(t) else '[green]on[/green]'}" for t in hook_config.targets(ctx.home)]
+    except CollectError as e:
+        hook_state = [f"[red]unreadable[/red]: {safe(e)}"]
+    if hook_state:
+        out.print("hooks: " + ", ".join(hook_state))
+
+
 @app.command()
-def status(project: ProjectOpt = Path("."), as_json: JsonOpt = False, home: HomeOpt = Path.home()) -> None:
-    """Show every skill, plugin, hook and MCP server your agents load."""
+def status(
+    project: ProjectOpt = Path("."),
+    show_all: Annotated[bool, typer.Option("--all", help="List every item.")] = False,
+    as_json: JsonOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Sum up what your agents load and whether it changed. --all lists every skill, plugin, hook and MCP server."""
+    if not show_all and not as_json:
+        _print_summary(load(home, project))
+        return
     home, proj = _paths(home, project)
     try:
         items = inventory(home, proj)
@@ -272,7 +310,13 @@ def status(project: ProjectOpt = Path("."), as_json: JsonOpt = False, home: Home
 
 
 @app.command()
-def diff(project: ProjectOpt = Path("."), repo_only: RepoOpt = False, as_json: JsonOpt = False, home: HomeOpt = Path.home()) -> None:
+def diff(
+    project: ProjectOpt = Path("."),
+    repo_only: RepoOpt = False,
+    all_files: Annotated[bool, typer.Option("--files", help="List every file of a changed plugin.")] = False,
+    as_json: JsonOpt = False,
+    home: HomeOpt = Path.home(),
+) -> None:
     """Show what changed since the last approve."""
     ctx = load(home, project)
     found = changes(ctx, repo_only)
@@ -280,7 +324,7 @@ def diff(project: ProjectOpt = Path("."), repo_only: RepoOpt = False, as_json: J
     if as_json:
         typer.echo(json.dumps([{**c.to_dict(), **_findings_json(findings, c.key)} for c in found], indent=2))
     elif found:
-        print_changes(found, findings)
+        print_changes(found, findings, all_files)
     else:
         out.print("no drift")
 
@@ -366,6 +410,21 @@ def _require_person() -> None:
         raise _fail("approving needs a person at a terminal.")
 
 
+def _trust_own_key(ctx: Ctx, key: Path | None, no_sign: bool) -> None:
+    """First setup only: with no signer list, locks signed with this key would fail their own check and approve nothing."""
+    signers = lk.rigseal_dir(ctx.home) / "allowed_signers"
+    sign_key = None if no_sign else signing.signing_key(key, ctx.project)
+    if sign_key is None or signers.exists():
+        return
+    try:
+        line = f'{signing.identity(ctx.project)} namespaces="{signing.NAMESPACE}" {signing.public_key(sign_key)}\n'
+    except SignError as e:
+        raise _fail(str(e)) from e
+    signers.parent.mkdir(parents=True, exist_ok=True)
+    signers.write_text(line)
+    out.print(f"trusting your signing key in {safe(signers)}")
+
+
 def _run_approve(ctx: Ctx, keys: set[str] | None, key: Path | None, no_sign: bool, allow_unsigned: bool) -> None:
     sign_key = None if no_sign else signing.signing_key(key, ctx.project)
     signed = [lock for lock in (ctx.repo, ctx.machine) if lock and lock.signed_by]
@@ -402,7 +461,54 @@ def init(
         if sign_key is None and not allow_unsigned:
             raise _fail("the existing lock is signed; --force without a key would drop the signature. Pass --key or --allow-unsigned.")
     ctx.repo = ctx.machine = None
+    _trust_own_key(ctx, key, no_sign)
     _run_approve(ctx, None, key, no_sign, allow_unsigned=True)
+
+
+@app.command()
+def setup(
+    project: ProjectOpt = Path("."),
+    key: KeyOpt = None,
+    no_sign: NoSignOpt = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask.")] = False,
+    home: HomeOpt = Path.home(),
+) -> None:
+    """Turn rigseal on: add its hooks to the agents you use and lock what they load today."""
+    _require_person()
+    if shutil.which("rigseal") is None:  # the hooks call `rigseal` by name; without it the MCP gate would silently not run
+        raise _fail("`rigseal` is not on your PATH, so the hooks could not run. Install it with `uv tool install`, see the README.")
+    ctx = load(home, project)
+    try:
+        todo = [(t, events) for t in hook_config.targets(ctx.home) if (events := hook_config.missing(t))]
+    except CollectError as e:
+        raise _fail(str(e)) from e
+    fresh = ctx.machine is None
+    if not todo and not fresh:
+        out.print("already set up. `rigseal status` shows where things stand.")
+        return
+
+    for target, events in todo:
+        out.print(f"add {target.agent} hooks to {safe(target.path)}: {', '.join(events)}")
+    if fresh:
+        out.print(f"lock the {len(ctx.items)} items your agents load today")
+    if not yes and os.environ.get("RIGSEAL_NONINTERACTIVE") != "1" and not typer.confirm("Go ahead?", default=True):
+        raise typer.Exit(1)
+
+    for target, _ in todo:
+        hook_config.add(target)
+        out.print(f"[green]hooks on[/green] for {target.agent}")
+    if not fresh:
+        out.print("Your settings changed, so run `rigseal approve` once to accept the new hooks.")
+        return
+
+    ctx = load(home, project)  # the settings just changed, and the lock must include the new hooks
+    # A repo lock that already exists belongs to the repo's reviewers. Only the machine lock is new.
+    keys = (set(ctx.current.machine) | set(ctx.current.local)) if ctx.repo else None
+    _trust_own_key(ctx, key, no_sign)
+    _run_approve(ctx, keys, key, no_sign, allow_unsigned=True)
+    high = sum(f.severity == "high" for f in rules.scan(ctx.items))
+    if high:
+        out.print(f"[yellow]{high} high finding(s) in what you just locked.[/yellow] Run `rigseal scan` to read them.")
 
 
 @app.command()
@@ -437,6 +543,7 @@ def approve(
 def scan(
     project: ProjectOpt = Path("."),
     fail_on: Annotated[str, typer.Option("--fail-on", help="Exit 1 at this severity or worse: high, medium, low, never.")] = "high",
+    show_all: Annotated[bool, typer.Option("--all", help="Also show low findings.")] = False,
     as_json: JsonOpt = False,
     as_sarif: SarifOpt = False,
     home: HomeOpt = Path.home(),
@@ -455,13 +562,15 @@ def scan(
     elif as_json:
         typer.echo(json.dumps([f.to_dict() for f in findings], indent=2))
     else:
-        for key in dict.fromkeys(f.key for f in findings):
+        shown = [f for f in findings if show_all or fail_on == "low" or f.severity != "low"]
+        for key in dict.fromkeys(f.key for f in shown):
             out.print(safe(key))
-            for f in findings:
+            for f in shown:
                 if f.key == key:
                     out.print(f"    {finding_line(f)}")
         counts = {s: sum(f.severity == s for f in findings) for s in rules.SEVERITIES}
-        out.print(", ".join(f"{n} {s}" for s, n in counts.items()) if findings else "no findings")
+        hidden = " (low hidden, --all shows them)" if len(shown) < len(findings) else ""
+        out.print(", ".join(f"{n} {s}" for s, n in counts.items()) + hidden if findings else "no findings")
     if fail_on != "never" and any(rules.SEVERITIES.index(f.severity) <= rules.SEVERITIES.index(fail_on) for f in findings):
         raise typer.Exit(1)
 

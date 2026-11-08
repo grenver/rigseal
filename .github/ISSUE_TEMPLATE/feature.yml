@@ -1,0 +1,16 @@
+name: Feature or new agent
+description: Something rigseal should do or read
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem in your daily use, before any solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: For a new agent, list the config files it loads and link its docs.

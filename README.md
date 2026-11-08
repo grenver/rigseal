@@ -2,26 +2,40 @@
 
 A lockfile for your AI agent setup. Pin every skill, plugin, hook and MCP server your coding agents load, and see when anything changes. Runs 100% local.
 
-Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. It can lock that state, show drift, and sign the locks with your SSH key.
+![An MCP server is rewritten, rigseal flags it in under a second, and the agent's tool call is denied](docs/demo.gif)
+
+Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. It can lock that state, show drift, block changed MCP servers, and sign the locks with your SSH key.
+
+## Try it
+
+See what your agents load. This reads files and changes nothing:
+
+```sh
+uvx --from git+https://github.com/jayhemnani9910/rigseal rigseal status
+```
 
 ## Install
 
 ```sh
 uv tool install git+https://github.com/jayhemnani9910/rigseal
+rigseal setup
 ```
+
+`setup` shows what it will do and asks first. It adds rigseal's hooks to the agents you use (Claude Code, Cursor) and locks what they load today. After that, a changed MCP server is blocked until you approve it.
 
 ## Use
 
 ```sh
-rigseal status              # inventory for your user config + the current repo
-rigseal init                # lock it: ~/.rigseal/machine.lock, and rigseal.lock in the repo
+rigseal status              # summary: items, drift, findings, hooks (--all lists every item)
+rigseal setup               # hooks + locks, in one step
+rigseal init                # only the locks: ~/.rigseal/machine.lock, and rigseal.lock in the repo
 rigseal diff                # what changed since you approved
 rigseal approve [KEY...]    # show changes and ask, then accept them (all, or just these keys)
 rigseal check               # exit 0 clean, 1 drift or bad signature, 2 error
 rigseal check --repo --require-signature   # in CI: repo lock only, must be signed
 ```
 
-`rigseal scan` runs the rules on everything, approved or not, and exits 1 on any HIGH finding (`--fail-on medium|low|never` to change that). `diff` and `check` show the same findings on items that were added or changed.
+`rigseal scan` runs the rules on everything, approved or not, and exits 1 on any HIGH finding (`--fail-on medium|low|never` to change that). Low findings are hidden unless you pass `--all`. `diff` and `check` show the same findings on items that were added or changed. A changed plugin shows file counts and any new capabilities; `rigseal diff --files` lists its files.
 
 ## Watch and hooks
 
@@ -29,7 +43,7 @@ rigseal check --repo --require-signature   # in CI: repo lock only, must be sign
 
 `rigseal hook claude-code` and `rigseal hook cursor` run as agent hooks. A drifted MCP server (added, changed or removed since approve) gets its tool calls denied, and so does every MCP call if that agent's own config or a lock can't be read. A lock that fails its signature approves nothing. Other drift is reported. Until `rigseal init` has run, hooks only say that rigseal is not set up; they never block. Each call takes about a second (a full check).
 
-Claude Code, in `~/.claude/settings.json`:
+`rigseal setup` adds these for you. To add them by hand instead, for Claude Code, in `~/.claude/settings.json`:
 
 ```json
 {
@@ -57,7 +71,7 @@ Cursor, in `~/.cursor/hooks.json`:
 }
 ```
 
-Adding these hooks changes your settings, so approve once afterwards.
+Adding these by hand changes your settings, so approve once afterwards.
 
 ## Rules
 
@@ -86,7 +100,7 @@ Per-file results are cached in `~/.cache/rigseal/` by file hash, so only new or 
 
 `rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
 
-**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The format is git's allowed-signers:
+**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The first `setup` or `init` adds your own key to `~/.rigseal/allowed_signers` if that file doesn't exist. The format is git's allowed-signers:
 
 ```
 you@example.com namespaces="rigseal" ssh-ed25519 AAAA...
