@@ -21,7 +21,7 @@ You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and `ssh-keygen` for th
 | What a hook replies to the agent | `src/rigseal/hooks.py` |
 | Commands and output | `src/rigseal/cli.py` |
 
-New rules also need a line in the README table and in `RULES` in `src/rigseal/sarif.py`.
+New rules also need a line in the table in `docs/reference.md` and in `RULES` in `src/rigseal/sarif.py`.
 
 ## Rules for changes
 
