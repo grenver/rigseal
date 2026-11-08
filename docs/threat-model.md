@@ -16,6 +16,7 @@ The second attacker is **a repo you clone**: its `.mcp.json`, `.claude/settings.
 | The agent runs `rigseal approve` to accept its own change | `approve` and `init` refuse without a terminal; at a terminal `approve` shows the changes and asks | An agent can set `RIGSEAL_NONINTERACTIVE=1` or fake a terminal. This is a speed bump, not a wall |
 | The agent drops the signature (`approve --no-sign`) | Refused while the lock is signed, unless `--allow-unsigned` | Same: the agent can pass the flag |
 | The agent edits the lock directly | A signed lock no longer verifies; `check` fails. A lock whose `.sig` was deleted fails. If `allowed_signers` exists, an unsigned lock fails | Only if the agent can't sign. See below |
+| A repo writer adds their own key to `.rigseal/allowed_signers` | The repo lock must also pass a list from outside the repo (`--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, `~/.rigseal/allowed_signers`). `--require-signature` fails without one. The Action uses the base branch's list on a PR | With no outside list, deleting the signature and the repo's list together goes unnoticed unless `--require-signature` is on |
 | The agent signs with your key | Nothing in rigseal can stop this if the key is readable and has no passphrase | Use one of the setups below |
 
 ## What actually makes approvals trustworthy
@@ -24,7 +25,7 @@ Signing only means something if **the agent cannot make a valid signature**. Pic
 
 1. **ssh-agent with confirmation.** Load the key with `ssh-add -c ~/.ssh/id_ed25519_signing`. Every signature then pops up a dialog (needs `ssh-askpass`) that a person has to click. Point rigseal at the public key (`--key ~/.ssh/id_ed25519_signing.pub`) so it signs through the agent.
 2. **A hardware key** (`ed25519-sk` on a YubiKey or similar): every signature needs a touch.
-3. **Approve in CI, not on the laptop**, for the repo lock: commit `rigseal.lock` and `.rigseal/allowed_signers`, and run `rigseal check --repo --require-signature` in CI. Changes to the lock then go through code review like any other change.
+3. **Approve in CI, not on the laptop**, for the repo lock: commit `rigseal.lock` and `.rigseal/allowed_signers`, and run `rigseal check --repo --require-signature --allowed-signers <list from outside the PR>` in CI (the GitHub Action does this with the base branch's list). Changes to the lock then go through code review like any other change.
 
 A passphrase on the key file helps only until the agent sees you type it, or reads it from a keyring it can reach.
 

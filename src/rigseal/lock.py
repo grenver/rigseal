@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,8 +34,12 @@ def repo_lock_path(project: Path) -> Path:
     return project / REPO_LOCK_NAME
 
 
-def item_key(item: Item) -> str:
+def plain_key(item: Item) -> str:
     return f"{item.agent}/{item.scope}/{item.kind}/{item.name}"
+
+
+def item_key(item: Item) -> str:
+    return item.lock_key or plain_key(item)
 
 
 def _rel(path: str, base: Path, prefix: str) -> str:
@@ -61,11 +66,12 @@ def keyed(items: list[Item], base: Path, prefix: str) -> dict[str, dict]:
     """Items as lock entries by key. Same key twice (e.g. a plugin installed twice) gets #2, #3."""
     out: dict[str, dict] = {}
     for item in items:
-        key = item_key(item)
+        key = plain_key(item)
         n = 1
         while key in out:
             n += 1
-            key = f"{item_key(item)}#{n}"
+            key = f"{plain_key(item)}#{n}"
+        item.lock_key = key
         out[key] = entry(item, base, prefix)
     return out
 
@@ -109,11 +115,19 @@ class Lock:
             doc["projects"] = {p: dict(sorted(v.items())) for p, v in sorted(self.projects.items()) if v}
         return json.dumps(doc, indent=2, sort_keys=False) + "\n"
 
-    def write(self) -> None:
+    def write(self, sign: Callable[[Path], Path] | None = None) -> None:
+        """Write the lock. With `sign`, a temp copy is signed first, so a failed signing leaves the old lock and .sig."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(self.to_json())
-        tmp.replace(self.path)
+        try:
+            signature = sign(tmp) if sign else None
+            tmp.replace(self.path)
+            if signature:
+                signature.replace(self.sig_path)
+        finally:
+            tmp.unlink(missing_ok=True)
+            tmp.with_name(tmp.name + ".sig").unlink(missing_ok=True)
 
 
 def read_lock(path: Path) -> Lock | None:
@@ -121,11 +135,29 @@ def read_lock(path: Path) -> Lock | None:
         doc = json.loads(path.read_text())
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise CollectError(f"cannot read lock {path}: {e}") from e
     if not isinstance(doc, dict) or doc.get("lockfileVersion") != LOCK_VERSION:
         raise CollectError(f"{path}: not a rigseal v{LOCK_VERSION} lockfile")
-    return Lock(path, doc.get("items") or {}, doc.get("projects") or {}, doc.get("signedBy"))
+    items, projects, signed_by = doc.get("items") or {}, doc.get("projects") or {}, doc.get("signedBy")
+    valid = _valid_entries(items) and isinstance(projects, dict) and all(_valid_entries(p) for p in projects.values())
+    if not valid or not isinstance(signed_by, str | None):
+        raise CollectError(f"{path}: malformed lockfile entries")
+    return Lock(path, items, projects, signed_by)
+
+
+def _valid_entries(entries: object) -> bool:
+    return isinstance(entries, dict) and all(_valid_entry(e) for e in entries.values())
+
+
+def _valid_entry(e: object) -> bool:
+    if not isinstance(e, dict) or not isinstance(e.get("kind"), str) or not isinstance(e.get("sha256"), str):
+        return False
+    details = e.get("details") or {}
+    if not isinstance(e.get("files", {}), dict) or not isinstance(details, dict):
+        return False
+    caps = details.get("capabilities") or {}
+    return isinstance(caps, dict) and all(isinstance(v, bool | list | dict) for v in caps.values())
 
 
 # --- diff --------------------------------------------------------------------
@@ -141,19 +173,20 @@ class Change:
     files_changed: list[str] = field(default_factory=list)
     details_changed: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)  # "+ network", "+ host evil.com", "- shell"
+    sha256: str = ""  # the item's current hash, empty once removed
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if v or k in ("key", "status", "lock")}
+        return {k: v for k, v in self.__dict__.items() if k != "sha256" and (v or k in ("key", "status", "lock"))}
 
 
 def diff_entries(locked: dict[str, dict], current: dict[str, dict], lock_name: str) -> list[Change]:
     changes = []
     for key in sorted(locked.keys() | current.keys()):
         old, new = locked.get(key), current.get(key)
-        if old is None:
-            changes.append(Change(key, "added", lock_name, files_added=sorted(new["files"])))
-        elif new is None:
+        if new is None:
             changes.append(Change(key, "removed", lock_name))
+        elif old is None:
+            changes.append(Change(key, "added", lock_name, files_added=sorted(new["files"]), sha256=new["sha256"]))
         elif old["sha256"] != new["sha256"] or old.get("details") != new.get("details"):
             of, nf = old.get("files", {}), new["files"]
             od, nd = old.get("details") or {}, new.get("details") or {}
@@ -167,6 +200,7 @@ def diff_entries(locked: dict[str, dict], current: dict[str, dict], lock_name: s
                     files_changed=sorted(k for k in of.keys() & nf.keys() if of[k] != nf[k]),
                     details_changed=sorted(k for k in od.keys() | nd.keys() if od.get(k) != nd.get(k)),
                     capabilities=capability_diff(od.get("capabilities") or {}, nd.get("capabilities") or {}),
+                    sha256=new["sha256"],
                 )
             )
     return changes

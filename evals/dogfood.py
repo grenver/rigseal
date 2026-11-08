@@ -41,6 +41,7 @@ def log() -> int:
             {
                 "key": c["key"],
                 "status": c["status"],
+                "sha256": c.get("sha256", ""),
                 "reason": classify(c),
                 "files": len(c.get("files_changed", [])) + len(c.get("files_added", [])) + len(c.get("files_removed", [])),
                 "rules": sorted({f["rule"] for f in c.get("findings", [])}),
@@ -61,12 +62,15 @@ def report() -> int:
         print(f"no log yet at {LOG}")
         return 1
     entries = [json.loads(line) for line in LOG.read_text().splitlines() if line.strip()]
+    if not entries:
+        print(f"no log yet at {LOG}")
+        return 1
     errors = [e for e in entries if "error" in e]
-    # A change stays pending until approved, so count each (key, status, files) once.
+    # A change stays pending until approved, so count each state of an item once.
     seen: dict[tuple, dict] = {}
     for e in entries:
         for c in e.get("changes", []):
-            seen.setdefault((c["key"], c["status"], c["files"]), {**c, "first_seen": e["at"]})
+            seen.setdefault((c["key"], c["status"], c["files"], c.get("sha256")), {**c, "first_seen": e["at"]})
     first, last = entries[0]["at"], entries[-1]["at"]
     days = max((datetime.fromisoformat(last) - datetime.fromisoformat(first)).days, 1)
     reasons = Counter(c["reason"] for c in seen.values())

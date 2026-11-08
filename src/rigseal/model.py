@@ -33,17 +33,19 @@ class Item:
     raw: object = field(default=None, repr=False, compare=False)
     # Text-rule hits per file, (relative name, [(rule, severity, message)]), filled with capabilities.
     file_hits: list[tuple[str, list[tuple[str, str, str]]]] = field(default_factory=list, repr=False, compare=False)
+    # The key this item has in the lock when it differs from the plain one (a duplicate gets #2, #3).
+    lock_key: str | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        del d["raw"], d["file_hits"]
+        del d["raw"], d["file_hits"], d["lock_key"]
         return d
 
     def text_files(self) -> list[tuple[str, Path]]:
         """(relative name, full path) for each hashed file of a file or folder item."""
         root = Path(self.path)
-        if root.is_dir():
-            return [(f.path, root / f.path) for f in self.files]
+        if root.is_dir():  # links inside a folder are hashed by target, so their contents are never read
+            return [(f.path, root / f.path) for f in self.files if not (root / f.path).is_symlink()]
         return [(f.path, root) for f in self.files]
 
 
@@ -68,15 +70,18 @@ def hash_bytes(data: bytes) -> str:
 
 def hash_file(path: Path) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
+    try:
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    except OSError as e:
+        raise CollectError(f"cannot read {path}: {e}") from e
     return h.hexdigest()
 
 
 def hash_json(value: object) -> str:
     """Stable hash of a JSON value. Used so secrets in configs are hashed, never stored."""
-    return hash_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    return hash_bytes(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode())
 
 
 # Limits per folder item, so a hostile repo can't make a scan run for hours.
@@ -103,10 +108,15 @@ def hash_tree(root: Path, ignore: frozenset[str] = frozenset()) -> Tree:
         for name in sorted(dirnames + [f for f in filenames if f not in ignore]):
             p = base / name
             rel = p.relative_to(root).as_posix()
-            if p.is_symlink():
-                files.append(FileHash(rel, hash_bytes(b"symlink:" + os.readlink(p).encode())))
-            elif p.is_file():
-                total += p.stat().st_size
+            try:
+                if p.is_symlink():
+                    files.append(FileHash(rel, hash_bytes(b"symlink:" + os.readlink(p).encode(errors="surrogateescape"))))
+                    continue
+                size = p.stat().st_size if p.is_file() else None
+            except OSError as e:
+                raise CollectError(f"cannot read {p}: {e}") from e
+            if size is not None:
+                total += size
                 if len(files) >= MAX_TREE_FILES or total > MAX_TREE_BYTES:
                     files.sort(key=lambda f: f.path)
                     return Tree(tree_digest(files), files, truncated=True)
@@ -117,4 +127,4 @@ def hash_tree(root: Path, ignore: frozenset[str] = frozenset()) -> Tree:
 
 def tree_digest(files: list[FileHash]) -> str:
     lines = "".join(f"{f.path}\0{f.sha256}\n" for f in sorted(files, key=lambda f: f.path))
-    return hash_bytes(lines.encode())
+    return hash_bytes(lines.encode(errors="surrogateescape"))

@@ -11,6 +11,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from rigseal import lock as lk
@@ -18,7 +19,7 @@ from rigseal import hooks, rules, sarif, signing
 from rigseal import watch as wt
 from rigseal.cache import Cache, cache_path
 from rigseal.capabilities import enrich
-from rigseal.collectors import COLLECTORS
+from rigseal.collectors import AGENTS_OF, COLLECTORS
 from rigseal.model import CollectError, Finding, Item
 from rigseal.signing import SignError
 
@@ -34,6 +35,10 @@ RepoOpt = Annotated[bool, typer.Option("--repo", help="Only the repo lock (for C
 KeyOpt = Annotated[Path | None, typer.Option("--key", help="SSH key to sign with (default: $RIGSEAL_SIGNING_KEY, then git user.signingkey).")]
 NoSignOpt = Annotated[bool, typer.Option("--no-sign", help="Do not sign.")]
 AllowUnsignedOpt = Annotated[bool, typer.Option("--allow-unsigned", help="Allow replacing a signed lock with an unsigned one.")]
+AllowedSignersOpt = Annotated[
+    Path | None,
+    typer.Option("--allowed-signers", help="Signer list from outside the repo that must also accept the repo lock (default: $RIGSEAL_ALLOWED_SIGNERS, then ~/.rigseal/allowed_signers)."),
+]
 
 
 @app.callback()
@@ -41,10 +46,21 @@ def main() -> None:
     """A lockfile for your AI agent setup."""
 
 
-def inventory(home: Path, project: Path | None) -> list[Item]:
+def safe(text: object) -> str:
+    """For printing anything that comes from a config or repo: it can't act as Rich markup or break the terminal encoding."""
+    return escape(str(text).encode("utf-8", "backslashreplace").decode())
+
+
+def inventory(home: Path, project: Path | None, errors: dict[str, str] | None = None) -> list[Item]:
+    """Everything the agents load. With `errors`, an agent whose config can't be read is recorded there and skipped."""
     items: list[Item] = []
     for collect in COLLECTORS:
-        items += collect(home, project)
+        try:
+            items += collect(home, project)
+        except Exception as e:
+            if errors is None:
+                raise
+            errors.update(dict.fromkeys(AGENTS_OF[collect], str(e) or type(e).__name__))
     cache = Cache(cache_path(home))
     enrich(items, cache)
     cache.save()
@@ -52,7 +68,7 @@ def inventory(home: Path, project: Path | None) -> list[Item]:
 
 
 def _fail(message: str) -> typer.Exit:
-    err.print(f"[red]error:[/red] {message}")
+    err.print(f"[red]error:[/red] {safe(message)}")
     return typer.Exit(2)
 
 
@@ -76,9 +92,9 @@ class Ctx:
         return str(self.project) if self.project else ""
 
 
-def _load(home: Path, project: Path) -> Ctx:
+def _load(home: Path, project: Path, errors: dict[str, str] | None = None) -> Ctx:
     home, proj = _paths(home, project)
-    items = inventory(home, proj)
+    items = inventory(home, proj, errors)
     repo = lk.read_lock(lk.repo_lock_path(proj)) if proj else None
     machine = lk.read_lock(lk.machine_lock_path(home))
     return Ctx(home, proj, items, lk.split(items, home, proj or home), repo, machine)
@@ -122,9 +138,17 @@ def changes(ctx: Ctx, repo_only: bool) -> list[lk.Change]:
 
 def drift(ctx: Ctx) -> tuple[list[lk.Change], str | None]:
     """All drift, for hooks and watch. Without a machine lock rigseal is not set up: nothing is checked, a note says so."""
-    if ctx.machine is None:
+    machine = ctx.machine
+    if machine is None:
         return [], f"rigseal is not set up (no {lk.machine_lock_path(ctx.home)}); run `rigseal init`."
-    return changes(ctx, repo_only=False), None
+    problems = []
+    if ctx.repo and ctx.project and (bad := lock_problems(ctx, ctx.repo, False)):  # a lock that fails its signature approves nothing
+        problems += bad
+        ctx.repo = lk.Lock(ctx.repo.path)
+    if bad := lock_problems(ctx, machine, False):
+        problems += bad
+        ctx.machine = lk.Lock(machine.path)
+    return changes(ctx, repo_only=False), "; ".join(problems) or None
 
 
 def item_paths(ctx: Ctx) -> dict[str, str]:
@@ -141,27 +165,40 @@ def item_paths(ctx: Ctx) -> dict[str, str]:
     return out
 
 
-def signature_problems(ctx: Ctx, repo_only: bool, require: bool) -> list[str]:
-    targets = []
-    if ctx.repo and ctx.project:
-        targets.append((ctx.repo, ctx.project / ".rigseal" / "allowed_signers"))
-    if ctx.machine and not repo_only:
-        targets.append((ctx.machine, lk.rigseal_dir(ctx.home) / "allowed_signers"))
+def lock_problems(ctx: Ctx, lock: lk.Lock, require: bool, allowed: Path | None = None) -> list[str]:
+    """Signature problems of one lock. A list inside the repo can be edited along with the lock, so the repo lock
+    must also pass a list from outside it when there is one."""
+    machine_list = lk.rigseal_dir(ctx.home) / "allowed_signers"
+    project = ctx.project if lock is ctx.repo else None
+    named = allowed or (Path(v).expanduser() if (v := os.environ.get("RIGSEAL_ALLOWED_SIGNERS")) else None)
+    outside = (named or (machine_list if machine_list.is_file() else None)) if project else None
+    signers = signing.allowed_signers_for(project / ".rigseal" / "allowed_signers" if project else machine_list, ctx.project)
 
+    if not lock.sig_path.exists():
+        if lock.signed_by:
+            return [f"{lock.path} says it is signed by {lock.signed_by} but {lock.sig_path.name} is missing"]
+        if require or signers.is_file() or (project and named):  # once signers are set up, unsigned is not ok
+            return [f"{lock.path} is not signed"]
+        return []
+    if not lock.signed_by:
+        return [f"{lock.path} has a signature but no signedBy"]
+    lists = ([signers] if signers.is_file() or outside is None else []) + ([outside] if outside else [])
+    try:
+        for signer_list in dict.fromkeys(lists):
+            signing.verify(lock.path, lock.signed_by, signer_list)
+    except SignError as e:
+        return [str(e)]
+    if require and project and outside is None and signers.is_relative_to(project):
+        return [f"{lock.path} is only checked against a signer list inside the repo, which anyone who can edit the lock can change. Pass --allowed-signers."]
+    return []
+
+
+def signature_problems(ctx: Ctx, repo_only: bool, require: bool, allowed: Path | None = None) -> list[str]:
     problems = []
-    for lock, default_signers in targets:
-        if not lock.sig_path.exists():
-            if lock.signed_by:
-                problems.append(f"{lock.path} says it is signed by {lock.signed_by} but {lock.sig_path.name} is missing")
-            elif require or default_signers.is_file():  # once signers are set up, unsigned is not ok
-                problems.append(f"{lock.path} is not signed")
-        elif not lock.signed_by:
-            problems.append(f"{lock.path} has a signature but no signedBy")
-        else:
-            try:
-                signing.verify(lock.path, lock.signed_by, signing.allowed_signers_for(default_signers, ctx.project))
-            except SignError as e:
-                problems.append(str(e))
+    if ctx.repo and ctx.project:
+        problems += lock_problems(ctx, ctx.repo, require, allowed)
+    if ctx.machine and not repo_only:
+        problems += lock_problems(ctx, ctx.machine, require)
     return problems
 
 
@@ -169,25 +206,25 @@ SEV_STYLE = {"high": "red", "medium": "yellow", "low": "dim"}
 
 
 def finding_line(f: Finding) -> str:
-    return f"[{SEV_STYLE[f.severity]}]{f.severity.upper():6}[/] {f.rule:4} {f.message}"
+    return f"[{SEV_STYLE[f.severity]}]{f.severity.upper():6}[/] {f.rule:4} {safe(f.message)}"
 
 
 def print_changes(found: list[lk.Change], findings: dict[str, list[Finding]]) -> None:
     marks = {"added": "[green]+[/green]", "removed": "[red]-[/red]", "changed": "[yellow]~[/yellow]"}
     for c in found:
-        out.print(f"{marks[c.status]} {c.key}  [dim]({c.lock} lock, {c.status})[/dim]")
+        out.print(f"{marks[c.status]} {safe(c.key)}  [dim]({c.lock} lock, {c.status})[/dim]")
         for f in findings.get(c.key, []):
             out.print(f"    {finding_line(f)}")
         if c.status != "changed":
             continue
         for label, files in (("changed", c.files_changed), ("new file", c.files_added), ("gone", c.files_removed)):
             for f in files:
-                out.print(f"    {label}: {f}")
+                out.print(f"    {label}: {safe(f)}")
         for line in c.capabilities:
-            out.print(f"    [bold]{line}[/bold]")
+            out.print(f"    [bold]{safe(line)}[/bold]")
         other = [d for d in c.details_changed if d != "capabilities"]
         if other:
-            out.print(f"    details: {', '.join(other)}")
+            out.print(f"    details: {safe(', '.join(other))}")
 
 
 def _notes(item: Item) -> str:
@@ -229,7 +266,7 @@ def status(project: ProjectOpt = Path("."), as_json: JsonOpt = False, home: Home
     for col in ("agent", "scope", "kind", "name", "files", "hash", "notes"):
         table.add_column(col, overflow="fold")
     for i in items:
-        table.add_row(i.agent, i.scope, i.kind, i.name, str(len(i.files)), i.sha256[:12], _notes(i))
+        table.add_row(i.agent, i.scope, i.kind, safe(i.name), str(len(i.files)), i.sha256[:12], safe(_notes(i)))
     out.print(table)
     typer.echo(f"{len(items)} items")
 
@@ -257,6 +294,7 @@ def check(
     project: ProjectOpt = Path("."),
     repo_only: RepoOpt = False,
     require_signature: Annotated[bool, typer.Option("--require-signature", help="Fail if a lock is unsigned.")] = False,
+    allowed_signers: AllowedSignersOpt = None,
     as_json: JsonOpt = False,
     as_sarif: SarifOpt = False,
     home: HomeOpt = Path.home(),
@@ -265,16 +303,16 @@ def check(
     ctx = load(home, project)
     found = changes(ctx, repo_only)
     findings = change_findings(ctx, found)
-    problems = signature_problems(ctx, repo_only, require_signature)
+    problems = signature_problems(ctx, repo_only, require_signature, allowed_signers)
     if as_sarif:
         flat = [f for fs in findings.values() for f in fs]
         typer.echo(json.dumps(sarif.report(ctx.items, flat, found, ctx.project, problems), indent=2))
     elif as_json:
-        changes_json = [{**c.to_dict(), **_findings_json(findings, c.key)} for c in found]
+        changes_json = [{**c.to_dict(), "sha256": c.sha256, **_findings_json(findings, c.key)} for c in found]
         typer.echo(json.dumps({"changes": changes_json, "signature_problems": problems}, indent=2))
     else:
         for p in problems:
-            out.print(f"[red]signature:[/red] {p}")
+            out.print(f"[red]signature:[/red] {safe(p)}")
         print_changes(found, findings)
         out.print(f"{len(found)} change(s), {len(problems)} signature problem(s)" if found or problems else "ok")
     if found or problems:
@@ -282,14 +320,14 @@ def check(
 
 
 def _save(lock: lk.Lock, key: Path | None, signer: str) -> str:
-    """Write the lock, then sign it if there is a key. An old signature is removed, since it no longer matches."""
+    """Write the lock, signed if there is a key. Without one an old signature is removed, since it no longer matches."""
     lock.signed_by = signer if key else None
-    lock.write()
     if key is None:
+        lock.write()
         lock.sig_path.unlink(missing_ok=True)
-        return f"wrote {lock.path} [yellow](unsigned)[/yellow]"
-    signing.sign(lock.path, key)
-    return f"wrote and signed {lock.path}"
+        return f"wrote {safe(lock.path)} [yellow](unsigned)[/yellow]"
+    lock.write(lambda path: signing.sign(path, key))
+    return f"wrote and signed {safe(lock.path)}"
 
 
 def _approve(ctx: Ctx, keys: set[str] | None, key: Path | None) -> list[str]:
@@ -305,7 +343,11 @@ def _approve(ctx: Ctx, keys: set[str] | None, key: Path | None) -> list[str]:
     new_m = lk.apply(old_m.items, ctx.current.machine, keys, who, when)
     projects = dict(old_m.projects)
     if ctx.project:
-        projects[ctx.project_key] = lk.apply(projects.get(ctx.project_key, {}), ctx.current.local, keys, who, when)
+        entries = lk.apply(projects.get(ctx.project_key, {}), ctx.current.local, keys, who, when)
+        if entries:
+            projects[ctx.project_key] = entries
+        else:
+            projects.pop(ctx.project_key, None)
     if ctx.machine is None or new_m != old_m.items or projects != old_m.projects:
         notes.append(_save(lk.Lock(old_m.path, new_m, projects), key, who))
     return notes
@@ -414,7 +456,7 @@ def scan(
         typer.echo(json.dumps([f.to_dict() for f in findings], indent=2))
     else:
         for key in dict.fromkeys(f.key for f in findings):
-            out.print(key)
+            out.print(safe(key))
             for f in findings:
                 if f.key == key:
                     out.print(f"    {finding_line(f)}")
@@ -425,6 +467,17 @@ def scan(
 
 
 AGENTS = ("claude-code", "cursor")
+
+
+def project_root(start: Path, home: Path) -> Path:
+    """The agent may be working in a subfolder; the project's lock and config live at its top."""
+    start, home = start.resolve(), home.expanduser().resolve()
+    for folder in (start, *start.parents):
+        if folder == home:
+            break
+        if (folder / lk.REPO_LOCK_NAME).exists() or (folder / ".git").exists():
+            return folder
+    return start
 
 
 @app.command()
@@ -443,16 +496,23 @@ def hook(
         payload = {}
     roots = payload.get("workspace_roots") or []
     where = Path(str(payload.get("cwd") or (roots[0] if roots else "") or Path.cwd()))
+    errors: dict[str, str] = {}
     try:
-        ctx = _load(home, where if where.is_dir() else home)
+        ctx = _load(home, project_root(where, home) if where.is_dir() else home, errors)
         found, note = drift(ctx)
         paths = item_paths(ctx)
-    except CollectError as e:  # never break the agent because rigseal failed; say so
-        found, note, paths = [], f"rigseal could not check the agent setup: {e}", {}
+        found = [c for c in found if c.key.split("/", 1)[0] not in errors]  # an unreadable agent's items only look removed
+        if errors:
+            note = " ".join(filter(None, [note, f"rigseal could not read the config of: {', '.join(sorted(errors))}."]))
+        broken = errors.get(agent)
+    except Exception as e:  # noqa: BLE001  never crash the agent, and never let a failed check open the MCP gate
+        found, note, paths, broken = [], f"rigseal could not check the agent setup: {e}", {}, str(e) or type(e).__name__
+    if not lk.machine_lock_path(home.expanduser().resolve()).exists():
+        broken = None  # not set up yet: hooks never block
     if agent == "claude-code":
-        reply, code = hooks.claude_code(payload, found, paths, note)
+        reply, code = hooks.claude_code(payload, found, paths, note, broken)
     else:
-        reply, code = hooks.cursor(payload, found, note)
+        reply, code = hooks.cursor(payload, found, note, broken)
     if reply is not None:
         typer.echo(json.dumps(reply))
     raise typer.Exit(code)
@@ -470,7 +530,7 @@ def watch(
 
     def say_once(note: str | None) -> None:
         if note and note != state.get("note"):
-            out.print(f"[yellow]{note}[/yellow]")
+            out.print(f"[yellow]{safe(note)}[/yellow]")
         state["note"] = note
 
     def check() -> wt.Result:
@@ -498,7 +558,7 @@ def watch(
                     out.print(f"[bold]{stamp}[/bold] drift:")
                     print_changes(new, change_findings(state["ctx"], new))
                 for key in cleared:
-                    out.print(f"[bold]{stamp}[/bold] [green]ok[/green] {key} (approved or reverted)")
+                    out.print(f"[bold]{stamp}[/bold] [green]ok[/green] {safe(key)} (approved or reverted)")
             time.sleep(interval)
     except KeyboardInterrupt:
         out.print("stopped")

@@ -11,9 +11,9 @@ from rigseal.readers import read_json
 
 
 def escapes(path: Path, within: Path | None) -> bool:
-    """True if `path` is a symlink that resolves outside `within` (the project). Such links are not followed:
-    a cloned repo could point a skill at / or at ~/.ssh."""
-    if within is None or not path.is_symlink():
+    """True if `path` resolves outside `within` (the project), through a link at any level. Such links are not
+    followed: a cloned repo could point a skill at / or at ~/.ssh."""
+    if within is None:
         return False
     try:
         return not path.resolve().is_relative_to(within.resolve())
@@ -23,8 +23,9 @@ def escapes(path: Path, within: Path | None) -> bool:
 
 def link_item(agent: str, path: Path, scope: str, kind: str, name: str) -> Item:
     """A symlink leaving the project: hashed by its target string, never read."""
-    target = os.readlink(path)
-    return Item(agent, scope, kind, name, str(path), hash_bytes(b"symlink:" + target.encode()), [], {"link": target, "outside_project": True})
+    target = os.readlink(path) if path.is_symlink() else str(path.resolve())  # else a parent folder is the link
+    digest = hash_bytes(b"symlink:" + target.encode(errors="surrogateescape"))
+    return Item(agent, scope, kind, name, str(path), digest, [], {"link": target, "outside_project": True})
 
 
 def single_file(agent: str, path: Path, scope: str, kind: str, name: str, details: dict | None = None) -> Item:
@@ -68,12 +69,16 @@ def mcp_item(agent: str, name: str, cfg: object, scope: str, where: Path) -> Ite
     details: dict = {}
     if isinstance(cfg, dict):
         transport = cfg.get("type") or ("stdio" if "command" in cfg else "http" if "url" in cfg else "unknown")
-        details["transport"] = transport
+        details["transport"] = str(transport)
         if "command" in cfg:
             details["command"] = str(cfg["command"])
-            details["arg_count"] = len(cfg.get("args") or [])
+            args = cfg.get("args")
+            details["arg_count"] = len(args) if isinstance(args, list) else 0
         if "url" in cfg:
-            details["host"] = urlparse(str(cfg["url"])).netloc
+            try:
+                details["host"] = urlparse(str(cfg["url"])).netloc
+            except ValueError:
+                details["host"] = "invalid url"
         for key in ("env", "headers", "http_headers"):
             if isinstance(cfg.get(key), dict) and cfg[key]:
                 details[f"{key}_keys"] = sorted(cfg[key])

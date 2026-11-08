@@ -6,7 +6,7 @@ branding:
 
 inputs:
   require-signature:
-    description: "Fail if rigseal.lock is not signed by someone in .rigseal/allowed_signers"
+    description: "Fail if rigseal.lock is not signed by someone in .rigseal/allowed_signers (on a PR, the base branch's copy of that file)"
     default: "false"
   upload-sarif:
     description: "Upload findings to GitHub code scanning (needs `security-events: write`; private repos need GitHub Advanced Security)"
@@ -35,9 +35,18 @@ runs:
         RIGSEAL: uv tool run --from ${{ github.action_path }} rigseal
         REQUIRE_SIG: ${{ inputs.require-signature }}
         COLUMNS: "200"
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         args=(check --repo)
         [ "$REQUIRE_SIG" = "true" ] && args+=(--require-signature)
+        # A PR must not be able to change the signer list it is checked against, so use the base branch's copy.
+        signers="$RUNNER_TEMP/rigseal-allowed-signers"
+        if [ -n "$BASE_SHA" ]; then
+          git fetch --quiet --depth=1 origin "$BASE_SHA" && git show FETCH_HEAD:./.rigseal/allowed_signers > "$signers" 2>/dev/null \
+            && args+=(--allowed-signers "$signers") || true
+        elif [ -f .rigseal/allowed_signers ]; then
+          args+=(--allowed-signers .rigseal/allowed_signers)
+        fi
         set +e
         $RIGSEAL "${args[@]}" --sarif > "$RUNNER_TEMP/rigseal.sarif"
         code=$?

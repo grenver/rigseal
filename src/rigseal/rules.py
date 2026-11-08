@@ -24,7 +24,11 @@ INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "deno", "bun"}
 TEMP_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
 RUNNERS = {"npx": 0, "bunx": 0, "uvx": 0, "pnpx": 0}  # package is the first non-flag arg
 BASE_URL_ENV = re.compile(r"(_BASE_URL|_API_URL|_ENDPOINT|^HTTPS?_PROXY|^ALL_PROXY)$", re.I)
-BROAD_BASH = re.compile(r"^Bash(\((\*|\*\*|\*:\*)\))?$")
+# Bash, Bash(*), and a shell as the command prefix, which also allows any command: Bash(bash:*), Bash(sh *).
+BROAD_BASH = re.compile(rf"^Bash(\((\*|\*\*|\*:\*|({'|'.join(re.escape(s) for s in sorted(SHELLS))})[: ]\*)\))?$")
+NOT_POSIX = {"pwsh", "powershell", "cmd", "cmd.exe"}  # their long single-dash flags aren't clusters
+C_CLUSTER = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")  # bash -lc, sh -xc, python3 -uc
+E_CLUSTER = re.compile(r"^-[a-zA-Z]*e[a-zA-Z]*$")  # perl -ne, ruby -pe
 
 
 def _base(cmd: object) -> str:
@@ -39,19 +43,37 @@ def _mcp_parts(item: Item) -> tuple[str, list[str]] | None:
     return str(cfg["command"]), [str(a) for a in args] if isinstance(args, list) else []
 
 
+def _inline_shell_flag(base: str, args: list[str]) -> str | None:
+    if exact := sorted({a.lower() for a in args} & INLINE_FLAGS):
+        return exact[0]
+    return None if base in NOT_POSIX else next((a for a in args if C_CLUSTER.match(a)), None)
+
+
+def _runs_inline_code(name: str, args: list[str]) -> bool:
+    if {a.lower() for a in args} & INLINE_FLAGS:
+        return True
+    if name == "python":
+        return any(C_CLUSTER.match(a) for a in args)
+    if name in ("perl", "ruby"):
+        return any(E_CLUSTER.match(a) for a in args)
+    if name in ("node", "bun"):
+        return bool({"-p", "--print", "-pe"} & set(args))
+    return name == "deno" and args[:1] == ["eval"]
+
+
 def r2_risky_stdio(item: Item) -> list[Finding]:
     if item.kind != "mcp" or not (parts := _mcp_parts(item)):
         return []
     cmd, args = parts
-    base, lowered = _base(cmd), {a.lower() for a in args}
+    base = _base(cmd)
     key, out = item_key(item), []
 
     def hit(msg: str) -> None:
         out.append(Finding("R2", "high", key, msg))
 
-    if base in SHELLS and lowered & INLINE_FLAGS:
-        hit(f"MCP server runs inline shell code ({base} {sorted(lowered & INLINE_FLAGS)[0]})")
-    if base.rstrip("0123456789.") in INTERPRETERS and lowered & INLINE_FLAGS:
+    if base in SHELLS and (flag := _inline_shell_flag(base, args)):
+        hit(f"MCP server runs inline shell code ({base} {flag})")
+    if (name := base.rstrip("0123456789.")) in INTERPRETERS and _runs_inline_code(name, args):
         hit(f"MCP server runs inline {base} code")
     joined = " ".join([cmd, *args])
     if re.search(r"\b(curl|wget)\b[^|]*\|\s*(ba|z|da)?sh\b", joined):
@@ -113,7 +135,8 @@ def r3_self_approving_project(item: Item) -> list[Finding]:
             hit("high", "repo pre-approves its own MCP servers (enabledMcpjsonServers)")
         perms = data.get("permissions") or {}
         if isinstance(perms, dict):
-            if any(isinstance(p, str) and BROAD_BASH.match(p) for p in perms.get("allow") or []):
+            allow = perms.get("allow")
+            if isinstance(allow, list) and any(isinstance(p, str) and BROAD_BASH.match(p) for p in allow):
                 hit("high", "repo allows any shell command (permissions.allow Bash(*))")
             if perms.get("defaultMode") == "bypassPermissions":
                 hit("high", "repo turns off permission prompts (defaultMode bypassPermissions)")
@@ -140,7 +163,7 @@ def r3_self_approving_project(item: Item) -> list[Finding]:
 
 def r15_hidden_unicode(item: Item) -> list[Finding]:
     found: dict[str, dict[str, int]] = dict((item.details.get("capabilities") or {}).get("hidden_chars") or {})
-    if item.raw is not None and (in_cfg := hidden_chars(json.dumps(item.raw, ensure_ascii=False))):
+    if item.raw is not None and (in_cfg := hidden_chars(json.dumps(item.raw, ensure_ascii=False, default=str))):
         found["config"] = in_cfg
     return [
         Finding(

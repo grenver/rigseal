@@ -7,6 +7,7 @@ Heuristics, not proof: the lock still catches any byte change.
 from __future__ import annotations
 
 import re
+import stat
 from pathlib import Path
 
 from rigseal.cache import Cache
@@ -82,7 +83,8 @@ def _read(path: Path) -> str | None:
     if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in (".cursorrules",):
         return None
     try:
-        if path.stat().st_size > MAX_BYTES:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:  # a link to /dev/zero reports size 0
             return None
         return path.read_text(errors="replace")
     except OSError:

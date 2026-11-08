@@ -40,16 +40,18 @@ def signing_key(explicit: Path | None, cwd: Path | None = None) -> Path | None:
     return None
 
 
+def _ssh_keygen(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["ssh-keygen", *args], capture_output=True, text=True, check=False, **kwargs)
+    except OSError as e:
+        raise SignError(f"cannot run ssh-keygen: {e}") from e
+
+
 def sign(path: Path, key: Path) -> Path:
     """Write <path>.sig. The key may be the private key or its .pub (ssh-agent then holds the private half)."""
     sig = path.with_name(path.name + ".sig")
     sig.unlink(missing_ok=True)
-    out = subprocess.run(
-        ["ssh-keygen", "-Y", "sign", "-n", NAMESPACE, "-f", str(key), str(path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    out = _ssh_keygen(["-Y", "sign", "-n", NAMESPACE, "-f", str(key), str(path)])
     if out.returncode != 0 or not sig.exists():
         raise SignError(f"signing {path} with {key} failed: {out.stderr.strip()}")
     return sig
@@ -61,13 +63,7 @@ def verify(path: Path, signer: str, allowed_signers: Path) -> None:
     if not allowed_signers.is_file():
         raise SignError(f"no allowed signers file at {allowed_signers}")
     with path.open("rb") as data:
-        out = subprocess.run(
-            ["ssh-keygen", "-Y", "verify", "-f", str(allowed_signers), "-I", signer, "-n", NAMESPACE, "-s", str(sig)],
-            stdin=data,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        out = _ssh_keygen(["-Y", "verify", "-f", str(allowed_signers), "-I", signer, "-n", NAMESPACE, "-s", str(sig)], stdin=data)
     if out.returncode != 0:
         raise SignError(f"bad signature on {path}: {out.stderr.strip() or out.stdout.strip()}")
 

@@ -66,8 +66,8 @@ ssh-keygen -Y sign -n rigseal -f <key> rigseal.lock   # writes rigseal.lock.sig
 
 - Key: `--key`, then `$RIGSEAL_SIGNING_KEY`, then git `user.signingkey` when `gpg.format=ssh`. With no key, the lock is written unsigned and any old `.sig` is removed.
 - `signedBy` is the signer's git `user.email`.
-- `check` verifies against an allowed signers file (same format as git's): `.rigseal/allowed_signers` in the project for the repo lock, `~/.rigseal/allowed_signers` for the machine lock, else git `gpg.ssh.allowedSignersFile`.
-- A lock with `signedBy` but no `.sig` fails `check`, so a deleted signature is caught. Use `--require-signature` in CI so an unsigned lock fails too.
+- `check` verifies against an allowed signers file (same format as git's): `.rigseal/allowed_signers` in the project for the repo lock, `~/.rigseal/allowed_signers` for the machine lock, else git `gpg.ssh.allowedSignersFile`. The repo lock must also pass a list from outside the repo, when there is one: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, then `~/.rigseal/allowed_signers`.
+- A lock with `signedBy` but no `.sig` fails `check`, so a deleted signature is caught. Use `--require-signature` in CI so an unsigned lock fails too. It also fails when the only signer list is inside the repo.
 
 ## Exit codes
 

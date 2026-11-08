@@ -27,7 +27,7 @@ rigseal check --repo --require-signature   # in CI: repo lock only, must be sign
 
 `rigseal watch` checks file stats every 0.5 s and prints drift as soon as it appears, and again when it is approved or reverted. A rewritten `.mcp.json` shows up in under a second.
 
-`rigseal hook claude-code` and `rigseal hook cursor` run as agent hooks. A drifted MCP server (added, changed or removed since approve) gets its tool calls denied. Other drift is reported. Until `rigseal init` has run, hooks only say that rigseal is not set up; they never block. Each call takes about a second (a full check).
+`rigseal hook claude-code` and `rigseal hook cursor` run as agent hooks. A drifted MCP server (added, changed or removed since approve) gets its tool calls denied, and so does every MCP call if that agent's own config or a lock can't be read. A lock that fails its signature approves nothing. Other drift is reported. Until `rigseal init` has run, hooks only say that rigseal is not set up; they never block. Each call takes about a second (a full check).
 
 Claude Code, in `~/.claude/settings.json`:
 
@@ -86,7 +86,7 @@ Per-file results are cached in `~/.cache/rigseal/` by file hash, so only new or 
 
 `rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
 
-**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock), in git's allowed-signers format:
+**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The format is git's allowed-signers:
 
 ```
 you@example.com namespaces="rigseal" ssh-ed25519 AAAA...

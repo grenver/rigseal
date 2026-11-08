@@ -6,3 +6,7 @@ build/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# /audit outputs
+graphify-out/
+.audit/

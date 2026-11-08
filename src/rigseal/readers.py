@@ -31,17 +31,17 @@ def read_json(path: Path) -> dict | None:
         text = path.read_text()
     except FileNotFoundError:
         return None
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise CollectError(f"cannot read {path}: {e}") from e
     if not text.strip():
         return {}
     try:
-        data = json.loads(text)
-    except ValueError:
         try:
+            data = json.loads(text)
+        except ValueError:
             data = json.loads(strip_jsonc(text))
-        except ValueError as e:
-            raise CollectError(f"cannot parse {path}: {e}") from e
+    except (ValueError, RecursionError) as e:
+        raise CollectError(f"cannot parse {path}: {e}") from e
     if not isinstance(data, dict):
         raise CollectError(f"{path}: expected a JSON object")
     return data
@@ -57,5 +57,5 @@ def read_toml(path: Path) -> dict | None:
             return tomllib.load(f)
     except FileNotFoundError:
         return None
-    except (OSError, tomllib.TOMLDecodeError) as e:
+    except (OSError, UnicodeDecodeError, RecursionError, tomllib.TOMLDecodeError) as e:
         raise CollectError(f"cannot read {path}: {e}") from e
