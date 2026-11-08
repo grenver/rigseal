@@ -57,6 +57,17 @@ def sign(path: Path, key: Path) -> Path:
     return sig
 
 
+def public_key(key: Path) -> str:
+    """The public half of `key`: the .pub given or beside it, else derived from the private key."""
+    for path in (key, key.with_name(key.name + ".pub")):
+        if path.suffix == ".pub" and path.is_file():
+            return path.read_text().strip()
+    out = _ssh_keygen(["-y", "-f", str(key)])
+    if out.returncode != 0:
+        raise SignError(f"cannot read the public key of {key}: {out.stderr.strip()}")
+    return out.stdout.strip()
+
+
 def verify(path: Path, signer: str, allowed_signers: Path) -> None:
     """Raise SignError unless <path>.sig is a valid signature by `signer` listed in allowed_signers."""
     sig = path.with_name(path.name + ".sig")

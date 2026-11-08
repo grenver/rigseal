@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -175,3 +176,25 @@ def test_plugin_update_is_summed_up(env):
     r = cli(env, "diff")
     assert "files: 2 changed" in r.output and "changed: a.md" not in r.output
     assert "changed: a.md" in cli(env, "diff", "--files").output
+
+
+@pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+def test_setup_with_a_signing_key_verifies_itself(env, tmp_path):
+    home, project = env
+    key = tmp_path / "k"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "dev@example.com", "-f", str(key)], check=True)
+    assert cli(env, "setup", "--key", str(key)).exit_code == 0
+    assert (project / "rigseal.lock.sig").is_file()
+    assert "dev@example.com" in (home / ".rigseal/allowed_signers").read_text()
+    assert cli(env, "check").exit_code == 0
+    assert "0 changed" in cli(env, "status").output
+
+
+@pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+def test_setup_keeps_an_existing_signer_list(env, tmp_path):
+    home, _ = env
+    write(home / ".rigseal/allowed_signers", "someone@example.com ssh-ed25519 AAAA\n")
+    key = tmp_path / "k"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    cli(env, "setup", "--key", str(key))
+    assert (home / ".rigseal/allowed_signers").read_text() == "someone@example.com ssh-ed25519 AAAA\n"

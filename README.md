@@ -100,7 +100,7 @@ Per-file results are cached in `~/.cache/rigseal/` by file hash, so only new or 
 
 `rigseal.lock` holds project-level items and is meant to be committed. The machine lock holds your user-level setup and stays on your laptop. In a fresh clone with no `rigseal.lock`, every project MCP server, skill and hook shows up as new.
 
-**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The format is git's allowed-signers:
+**Signing.** `init` and `approve` sign each lock with `ssh-keygen -Y sign` using `--key`, `$RIGSEAL_SIGNING_KEY`, or git's SSH `user.signingkey`. `check` verifies against `.rigseal/allowed_signers` in the repo (or `~/.rigseal/allowed_signers` for the machine lock). The repo can edit its own list, so the repo lock must also pass a list from outside it: `--allowed-signers`, `$RIGSEAL_ALLOWED_SIGNERS`, or `~/.rigseal/allowed_signers`. With none of those, `--require-signature` fails. The GitHub Action uses the base branch's list on a PR. The first `setup` or `init` adds your own key to `~/.rigseal/allowed_signers` if that file doesn't exist. The format is git's allowed-signers:
 
 ```
 you@example.com namespaces="rigseal" ssh-ed25519 AAAA...

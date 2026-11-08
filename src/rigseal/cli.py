@@ -410,6 +410,21 @@ def _require_person() -> None:
         raise _fail("approving needs a person at a terminal.")
 
 
+def _trust_own_key(ctx: Ctx, key: Path | None, no_sign: bool) -> None:
+    """First setup only: with no signer list, locks signed with this key would fail their own check and approve nothing."""
+    signers = lk.rigseal_dir(ctx.home) / "allowed_signers"
+    sign_key = None if no_sign else signing.signing_key(key, ctx.project)
+    if sign_key is None or signers.exists():
+        return
+    try:
+        line = f'{signing.identity(ctx.project)} namespaces="{signing.NAMESPACE}" {signing.public_key(sign_key)}\n'
+    except SignError as e:
+        raise _fail(str(e)) from e
+    signers.parent.mkdir(parents=True, exist_ok=True)
+    signers.write_text(line)
+    out.print(f"trusting your signing key in {safe(signers)}")
+
+
 def _run_approve(ctx: Ctx, keys: set[str] | None, key: Path | None, no_sign: bool, allow_unsigned: bool) -> None:
     sign_key = None if no_sign else signing.signing_key(key, ctx.project)
     signed = [lock for lock in (ctx.repo, ctx.machine) if lock and lock.signed_by]
@@ -446,6 +461,7 @@ def init(
         if sign_key is None and not allow_unsigned:
             raise _fail("the existing lock is signed; --force without a key would drop the signature. Pass --key or --allow-unsigned.")
     ctx.repo = ctx.machine = None
+    _trust_own_key(ctx, key, no_sign)
     _run_approve(ctx, None, key, no_sign, allow_unsigned=True)
 
 
@@ -488,6 +504,7 @@ def setup(
     ctx = load(home, project)  # the settings just changed, and the lock must include the new hooks
     # A repo lock that already exists belongs to the repo's reviewers. Only the machine lock is new.
     keys = (set(ctx.current.machine) | set(ctx.current.local)) if ctx.repo else None
+    _trust_own_key(ctx, key, no_sign)
     _run_approve(ctx, keys, key, no_sign, allow_unsigned=True)
     high = sum(f.severity == "high" for f in rules.scan(ctx.items))
     if high:
