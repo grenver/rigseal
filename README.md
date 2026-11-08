@@ -4,6 +4,10 @@ A lockfile for your AI agent setup. Pin every skill, plugin, hook and MCP server
 
 ![An MCP server is rewritten, rigseal flags it in under a second, and the agent's tool call is denied](docs/demo.gif)
 
+<a href="https://github.com/jayhemnani9910/rigseal/releases/download/v0.1.0/rigseal-howto.mp4"><img src="docs/how-to-poster.jpg" width="480" alt="Watch the one-minute guide"></a>
+
+**[Watch the one-minute guide](https://github.com/jayhemnani9910/rigseal/releases/download/v0.1.0/rigseal-howto.mp4)**: what rigseal is and how to use it.
+
 Status: early. Today it inventories Claude Code, Codex, Cursor, VS Code/Copilot and the shared `~/.agents/skills` folder. It can lock that state, show drift, block changed MCP servers, and sign the locks with your SSH key.
 
 ## Try it
